@@ -5,7 +5,7 @@ export type TransactionType = 'income' | 'expense' | 'transfer';
 export type TransactionCategory =
   | 'food' | 'transport' | 'shopping' | 'entertainment' | 'health'
   | 'utilities' | 'housing' | 'education' | 'salary' | 'investment'
-  | 'transfer' | 'other';
+  | 'transfer' | 'other' | 'general';
 
 export class CreateTransactionDto {
   @IsNumber()
@@ -16,7 +16,7 @@ export class CreateTransactionDto {
   @IsEnum(['income', 'expense', 'transfer'])
   type: TransactionType;
 
-  @IsEnum(['food', 'transport', 'shopping', 'entertainment', 'health', 'utilities', 'housing', 'education', 'salary', 'investment', 'transfer', 'other'])
+  @IsEnum(['food', 'transport', 'shopping', 'entertainment', 'health', 'utilities', 'housing', 'education', 'salary', 'investment', 'transfer', 'other', 'general'])
   category: TransactionCategory;
 
   @IsString()
@@ -46,7 +46,7 @@ export class UpdateTransactionDto {
   type?: TransactionType;
 
   @IsOptional()
-  @IsEnum(['food', 'transport', 'shopping', 'entertainment', 'health', 'utilities', 'housing', 'education', 'salary', 'investment', 'transfer', 'other'])
+  @IsEnum(['food', 'transport', 'shopping', 'entertainment', 'health', 'utilities', 'housing', 'education', 'salary', 'investment', 'transfer', 'other', 'general'])
   category?: TransactionCategory;
 
   @IsOptional()
