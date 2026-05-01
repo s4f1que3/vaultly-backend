@@ -14,6 +14,7 @@ const DEFAULT_CATEGORIES = [
   { name: 'investment',    icon: '📈', color: '#14b8a6' },
   { name: 'transfer',      icon: '🔄', color: '#9c9585' },
   { name: 'other',         icon: '📦', color: '#5c5648' },
+  { name: 'general',       icon: '🗂️', color: '#94a3b8' },
 ];
 
 @Injectable()
