@@ -29,10 +29,6 @@ export class UpdateBudgetDto {
   limit_amount?: number;
 
   @IsOptional()
-  @IsString()
-  period?: string;
-
-  @IsOptional()
   @IsNumber()
   @Min(1)
   @Max(100)

@@ -90,8 +90,12 @@ export class BudgetsService {
       .from('Budgets').select('id').eq('id', id).eq('user_id', userId).single();
     if (!existing) throw new NotFoundException('Budget not found');
 
+    const updatePayload: Record<string, unknown> = {};
+    if (dto.limit_amount !== undefined) updatePayload.limit_amount = dto.limit_amount;
+    if (dto.alert_threshold !== undefined) updatePayload.alert_threshold = dto.alert_threshold;
+
     const { data, error } = await this.supabase.db
-      .from('Budgets').update(dto).eq('id', id).eq('user_id', userId).select().single();
+      .from('Budgets').update(updatePayload).eq('id', id).eq('user_id', userId).select().single();
     if (error) throw new BadRequestException(error.message);
 
     const category = await this.categories.resolveSlug(
