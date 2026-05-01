@@ -77,7 +77,7 @@ export class TransactionsService {
 
     if (error) throw new BadRequestException(error.message);
 
-    await this.updateBudgetSpent(userId, category_id, effectiveCategory);
+    await this.updateBudgetSpent(userId, category_id, effectiveCategory, dto.date);
 
     return { ...data, category: effectiveCategory };
   }
@@ -122,10 +122,18 @@ export class TransactionsService {
 
     const oldCategoryId = existing.category_id as string;
     const oldSlug = await this.categories.resolveSlug(userId, oldCategoryId);
+    const oldDate = existing.date as string;
+    const newDate = (dto.date ?? existing.date) as string;
 
-    await this.updateBudgetSpent(userId, oldCategoryId, oldSlug);
+    // Always recalculate old category in the old transaction's month
+    await this.updateBudgetSpent(userId, oldCategoryId, oldSlug, oldDate);
+
     if (newCategoryId && newCategoryId !== oldCategoryId) {
-      await this.updateBudgetSpent(userId, newCategoryId, newCategorySlug!);
+      // Category changed: recalculate new category in new date's month
+      await this.updateBudgetSpent(userId, newCategoryId, newCategorySlug!, newDate);
+    } else if (dto.date && dto.date !== oldDate) {
+      // Only date changed: also recalculate same category in new date's month
+      await this.updateBudgetSpent(userId, oldCategoryId, oldSlug, newDate);
     }
 
     const resolvedSlug = newCategorySlug ?? await this.categories.resolveSlug(userId, data.category_id);
@@ -151,15 +159,15 @@ export class TransactionsService {
     if (error) throw new BadRequestException(error.message);
 
     const slug = await this.categories.resolveSlug(userId, existing.category_id as string);
-    await this.updateBudgetSpent(userId, existing.category_id as string, slug);
+    await this.updateBudgetSpent(userId, existing.category_id as string, slug, existing.date as string);
   }
 
-  private async updateBudgetSpent(userId: string, categoryId: string, categorySlug: string) {
-    const now = new Date();
-    const month = now.getMonth() + 1;
-    const year = now.getFullYear();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).toISOString();
+  private async updateBudgetSpent(userId: string, categoryId: string, categorySlug: string, forDate?: string) {
+    const ref = forDate ? new Date(forDate) : new Date();
+    const month = ref.getMonth() + 1;
+    const year = ref.getFullYear();
+    const startOfMonth = new Date(ref.getFullYear(), ref.getMonth(), 1).toISOString();
+    const endOfMonth = new Date(ref.getFullYear(), ref.getMonth() + 1, 0).toISOString();
 
     const { data: txs } = await this.supabase.db
       .from('Transactions')
