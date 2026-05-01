@@ -19,6 +19,9 @@ export class CreateCardDto {
   @IsEnum(['visa', 'mastercard', 'amex'])
   card_type: string;
 
+  @IsEnum(['credit', 'debit'])
+  card_kind: string;
+
   @IsEnum(['green', 'dark', 'brown', 'purple', 'gold'])
   theme: string;
 
