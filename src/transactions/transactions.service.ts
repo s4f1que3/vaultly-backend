@@ -57,36 +57,6 @@ export class TransactionsService {
     };
   }
 
-  async getMerchants(userId: string) {
-    const { data, error } = await this.supabase.db
-      .from('Transactions')
-      .select('merchant, amount, type, date')
-      .eq('user_id', userId)
-      .not('merchant', 'is', null)
-      .neq('merchant', '');
-
-    if (error) throw new BadRequestException(error.message);
-
-    type Row = { merchant: string; amount: number; type: string; date: string };
-    const map = new Map<string, { count: number; total: number; lastDate: string }>();
-
-    for (const row of (data ?? []) as Row[]) {
-      const key = row.merchant.trim();
-      const existing = map.get(key);
-      if (existing) {
-        existing.count += 1;
-        existing.total += row.type === 'expense' ? row.amount : 0;
-        if (row.date > existing.lastDate) existing.lastDate = row.date;
-      } else {
-        map.set(key, { count: 1, total: row.type === 'expense' ? row.amount : 0, lastDate: row.date });
-      }
-    }
-
-    return Array.from(map.entries())
-      .map(([merchant, stats]) => ({ merchant, ...stats }))
-      .sort((a, b) => b.total - a.total);
-  }
-
   async create(userId: string, dto: CreateTransactionDto) {
     // Auto-categorize from merchant if a learned rule or pattern matches
     let effectiveCategory = dto.category;
