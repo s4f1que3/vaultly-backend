@@ -171,25 +171,38 @@ export class TransactionsService {
 
     const { data: txs } = await this.supabase.db
       .from('Transactions')
-      .select('amount')
+      .select('amount, type, budget_impact')
       .eq('user_id', userId)
       .eq('category_id', categoryId)
-      .eq('type', 'expense')
       .gte('date', startOfMonth)
       .lte('date', endOfMonth);
 
-    const spent = txs?.reduce((s: number, t: { amount: number }) => s + t.amount, 0) ?? 0;
+    type TxRow = { amount: number; type: string; budget_impact?: string };
+
+    // spent = expenses + transfers marked as decrease
+    const spent = (txs ?? []).reduce((s: number, t: TxRow) => {
+      if (t.type === 'expense') return s + t.amount;
+      if (t.type === 'transfer' && t.budget_impact === 'decrease') return s + t.amount;
+      return s;
+    }, 0);
+
+    // income_received = income + transfers marked as increase (adds to the budget pool)
+    const income_received = (txs ?? []).reduce((s: number, t: TxRow) => {
+      if (t.type === 'income') return s + t.amount;
+      if (t.type === 'transfer' && t.budget_impact === 'increase') return s + t.amount;
+      return s;
+    }, 0);
 
     // Only update this month's budget row
     await this.supabase.db
       .from('Budgets')
-      .update({ spent_amount: spent })
+      .update({ spent_amount: spent, income_amount: income_received })
       .eq('user_id', userId)
       .eq('category_id', categoryId)
       .eq('month', month)
       .eq('year', year);
 
-    // Check alert threshold against this month's budget only
+    // Check alert threshold against effective limit (base limit + income received)
     const { data: budget } = await this.supabase.db
       .from('Budgets')
       .select('*')
@@ -199,14 +212,15 @@ export class TransactionsService {
       .eq('year', year)
       .single();
 
-    if (budget && budget.limit_amount > 0) {
-      const pct = (spent / budget.limit_amount) * 100;
+    if (budget) {
+      const effectiveLimit = (budget.limit_amount ?? 0) + (budget.income_amount ?? 0);
+      const pct = effectiveLimit > 0 ? (spent / effectiveLimit) * 100 : 0;
       if (pct >= budget.alert_threshold) {
         await this.supabase.db.from('Notifications').insert({
           user_id: userId,
           type: 'budget_alert',
           title: `Budget Alert: ${categorySlug}`,
-          body: `You've used ${pct.toFixed(0)}% of your ${categorySlug} budget (${spent.toFixed(2)} of ${budget.limit_amount.toFixed(2)})`,
+          body: `You've used ${pct.toFixed(0)}% of your ${categorySlug} budget (${spent.toFixed(2)} of ${effectiveLimit.toFixed(2)})`,
           is_read: false,
         });
       }

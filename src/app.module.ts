@@ -16,6 +16,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
 import { SummariesModule } from './summaries/summaries.module';
 import { BillingModule } from './billing/billing.module';
 import { LicensesModule } from './licenses/licenses.module';
+import { SavingsPotsModule } from './savings-pots/savings-pots.module';
 import { AuthGuard } from './common/guards/auth.guard';
 import { AlertService } from './common/alert.service';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
@@ -39,6 +40,7 @@ import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
     SummariesModule,
     BillingModule,
     LicensesModule,
+    SavingsPotsModule,
   ],
   providers: [
     AlertService,

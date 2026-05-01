@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase.service';
 
 const DEFAULT_CATEGORIES = [
@@ -80,6 +80,28 @@ export class CategoriesService {
     }
 
     this.cache.set(userId, existingMap);
+  }
+
+  async createCustom(userId: string, label: string, emoji: string) {
+    const slug = label.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+    if (slug.length < 2) throw new BadRequestException('Category name too short after formatting');
+
+    await this.ensureDefaults(userId);
+
+    if (this.cache.get(userId)?.has(slug)) {
+      throw new ConflictException(`Category "${slug}" already exists`);
+    }
+
+    const { data, error } = await this.supabase.db
+      .from('Categories')
+      .insert({ name: slug, icon: emoji, color: '#6366f1', user_id: userId, is_default: false })
+      .select('id, name, icon, color')
+      .single();
+
+    if (error) throw new BadRequestException(error.message);
+    this.cache.get(userId)?.set(slug, (data as { id: string }).id);
+
+    return { slug, label, emoji, color: '#6366f1' };
   }
 
   private async createCategory(userId: string, slug: string): Promise<string> {
