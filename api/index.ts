@@ -14,7 +14,9 @@ const appReady = NestFactory.create(
   new ExpressAdapter(expressServer),
   { rawBody: true, logger: ['error', 'warn'] },
 ).then(async (app) => {
-  app.use(helmet());
+  app.use(helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  }));
 
   app.enableCors({
     origin: process.env.FRONTEND_URL || 'https://vaultly.cash',
