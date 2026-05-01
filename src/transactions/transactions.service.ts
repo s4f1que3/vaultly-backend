@@ -143,7 +143,7 @@ export class TransactionsService {
   async delete(userId: string, id: string) {
     const { data: existing } = await this.supabase.db
       .from('Transactions')
-      .select('category_id')
+      .select('category_id, date')
       .eq('id', id)
       .eq('user_id', userId)
       .single();
