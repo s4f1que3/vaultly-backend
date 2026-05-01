@@ -101,6 +101,10 @@ export class TransactionQueryDto {
   cardId?: string;
 
   @IsOptional()
+  @IsString()
+  merchant?: string;
+
+  @IsOptional()
   @Type(() => Number)
   page?: number = 1;
 

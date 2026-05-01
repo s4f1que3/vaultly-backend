@@ -13,7 +13,7 @@ export class TransactionsService {
   ) {}
 
   async findAll(userId: string, query: TransactionQueryDto) {
-    const { page = 1, limit = 20, type, category, search, dateFrom, dateTo, cardId } = query;
+    const { page = 1, limit = 20, type, category, search, dateFrom, dateTo, cardId, merchant } = query;
     const offset = (page - 1) * limit;
 
     let q = this.supabase.db
@@ -27,6 +27,7 @@ export class TransactionsService {
     if (dateFrom) q = q.gte('date', dateFrom);
     if (dateTo) q = q.lte('date', dateTo);
     if (cardId) q = q.eq('card_id', cardId);
+    if (merchant) q = q.ilike('merchant', merchant);
     if (search) q = q.or(`description.ilike.%${search}%,merchant.ilike.%${search}%`);
 
     if (category) {
@@ -54,6 +55,36 @@ export class TransactionsService {
         totalPages: Math.ceil((count || 0) / limit),
       },
     };
+  }
+
+  async getMerchants(userId: string) {
+    const { data, error } = await this.supabase.db
+      .from('Transactions')
+      .select('merchant, amount, type, date')
+      .eq('user_id', userId)
+      .not('merchant', 'is', null)
+      .neq('merchant', '');
+
+    if (error) throw new BadRequestException(error.message);
+
+    type Row = { merchant: string; amount: number; type: string; date: string };
+    const map = new Map<string, { count: number; total: number; lastDate: string }>();
+
+    for (const row of (data ?? []) as Row[]) {
+      const key = row.merchant.trim();
+      const existing = map.get(key);
+      if (existing) {
+        existing.count += 1;
+        existing.total += row.type === 'expense' ? row.amount : 0;
+        if (row.date > existing.lastDate) existing.lastDate = row.date;
+      } else {
+        map.set(key, { count: 1, total: row.type === 'expense' ? row.amount : 0, lastDate: row.date });
+      }
+    }
+
+    return Array.from(map.entries())
+      .map(([merchant, stats]) => ({ merchant, ...stats }))
+      .sort((a, b) => b.total - a.total);
   }
 
   async create(userId: string, dto: CreateTransactionDto) {

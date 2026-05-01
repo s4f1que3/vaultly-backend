@@ -18,6 +18,11 @@ export class TransactionsController {
     return this.service.findAll(user.id, query);
   }
 
+  @Get('merchants')
+  getMerchants(@CurrentUser() user: User) {
+    return this.service.getMerchants(user.id);
+  }
+
   @Post()
   create(@CurrentUser() user: User, @Body() dto: CreateTransactionDto) {
     return this.service.create(user.id, dto);
