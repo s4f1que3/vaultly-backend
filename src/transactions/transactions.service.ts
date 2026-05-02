@@ -79,7 +79,6 @@ export class TransactionsService {
     if (error) throw new BadRequestException(error.message);
 
     await this.updateBudgetSpent(userId, category_id, effectiveCategory, dto.date);
-    await this.adjustCardBalance(userId, card_id, this.balanceDelta(dto.type, dto.amount, dto.budget_impact));
 
     return { ...data, category: effectiveCategory };
   }
@@ -138,12 +137,6 @@ export class TransactionsService {
       await this.updateBudgetSpent(userId, oldCategoryId, oldSlug, newDate);
     }
 
-    // Reverse old card balance effect, then apply new
-    const oldCardId = (existing.card_id as string | null) ?? null;
-    const newCardId = (dto.card_id !== undefined ? (dto.card_id || null) : oldCardId);
-    await this.adjustCardBalance(userId, oldCardId, -this.balanceDelta(existing.type as string, existing.amount as number, existing.budget_impact as string | undefined));
-    await this.adjustCardBalance(userId, newCardId, this.balanceDelta(dto.type ?? existing.type as string, dto.amount ?? existing.amount as number, dto.budget_impact ?? existing.budget_impact as string | undefined));
-
     const resolvedSlug = newCategorySlug ?? await this.categories.resolveSlug(userId, data.category_id);
     return { ...data, category: resolvedSlug };
   }
@@ -151,7 +144,7 @@ export class TransactionsService {
   async delete(userId: string, id: string) {
     const { data: existing } = await this.supabase.db
       .from('Transactions')
-      .select('category_id, date, card_id, amount, type, budget_impact')
+      .select('category_id, date')
       .eq('id', id)
       .eq('user_id', userId)
       .single();
@@ -168,39 +161,6 @@ export class TransactionsService {
 
     const slug = await this.categories.resolveSlug(userId, existing.category_id as string);
     await this.updateBudgetSpent(userId, existing.category_id as string, slug, existing.date as string);
-    await this.adjustCardBalance(userId, (existing.card_id as string | null) ?? null, -this.balanceDelta(existing.type as string, existing.amount as number, existing.budget_impact as string | undefined));
-  }
-
-  private balanceDelta(type: string, amount: number, budgetImpact?: string): number {
-    if (type === 'income') return amount;
-    if (type === 'expense') return -amount;
-    // transfer: honour the user's explicit impact choice
-    if (budgetImpact === 'increase') return amount;
-    if (budgetImpact === 'decrease') return -amount;
-    return 0; // 'none'
-  }
-
-  private async adjustCardBalance(userId: string, cardId: string | null, delta: number) {
-    if (!cardId || delta === 0) return;
-
-    const { data: card, error: fetchErr } = await this.supabase.db
-      .from('Cards')
-      .select('balance')
-      .eq('id', cardId)
-      .eq('user_id', userId)
-      .single();
-
-    if (fetchErr || !card) return;
-
-    // Supabase returns NUMERIC columns as strings — parse explicitly
-    const current = parseFloat(String(card.balance ?? '0'));
-    const newBalance = Math.round((current + delta) * 100) / 100;
-
-    await this.supabase.db
-      .from('Cards')
-      .update({ balance: newBalance })
-      .eq('id', cardId)
-      .eq('user_id', userId);
   }
 
   private async updateBudgetSpent(userId: string, categoryId: string, categorySlug: string, forDate?: string) {
