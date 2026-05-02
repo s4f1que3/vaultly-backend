@@ -183,18 +183,22 @@ export class TransactionsService {
   private async adjustCardBalance(userId: string, cardId: string | null, delta: number) {
     if (!cardId || delta === 0) return;
 
-    const { data: card } = await this.supabase.db
+    const { data: card, error: fetchErr } = await this.supabase.db
       .from('Cards')
       .select('balance')
       .eq('id', cardId)
       .eq('user_id', userId)
       .single();
 
-    if (!card) return;
+    if (fetchErr || !card) return;
+
+    // Supabase returns NUMERIC columns as strings — parse explicitly
+    const current = parseFloat(String(card.balance ?? '0'));
+    const newBalance = Math.round((current + delta) * 100) / 100;
 
     await this.supabase.db
       .from('Cards')
-      .update({ balance: (card.balance ?? 0) + delta })
+      .update({ balance: newBalance })
       .eq('id', cardId)
       .eq('user_id', userId);
   }
