@@ -80,11 +80,6 @@ export class TransactionsService {
 
     await this.updateBudgetSpent(userId, category_id, effectiveCategory, dto.date);
 
-    if (card_id) {
-      const delta = this.getTransactionDelta(dto.amount, dto.type, dto.budget_impact);
-      await this.adjustCardBalance(card_id, delta);
-    }
-
     return { ...data, category: effectiveCategory };
   }
 
@@ -142,25 +137,6 @@ export class TransactionsService {
       await this.updateBudgetSpent(userId, oldCategoryId, oldSlug, newDate);
     }
 
-    // Adjust card balances for any change in card, amount, type, or budget_impact
-    const oldCardId = (existing.card_id as string) || null;
-    const newCardId = (dto.card_id !== undefined ? dto.card_id : oldCardId) || null;
-    const oldDelta = oldCardId ? this.getTransactionDelta(existing.amount as number, existing.type as string, existing.budget_impact as string | undefined) : 0;
-    const newDelta = newCardId ? this.getTransactionDelta(
-      (dto.amount ?? existing.amount) as number,
-      (dto.type ?? existing.type) as string,
-      (dto.budget_impact ?? existing.budget_impact) as string | undefined,
-    ) : 0;
-
-    if (oldCardId === newCardId) {
-      if (newCardId && newDelta !== oldDelta) {
-        await this.adjustCardBalance(newCardId, newDelta - oldDelta);
-      }
-    } else {
-      if (oldCardId) await this.adjustCardBalance(oldCardId, -oldDelta);
-      if (newCardId) await this.adjustCardBalance(newCardId, newDelta);
-    }
-
     const resolvedSlug = newCategorySlug ?? await this.categories.resolveSlug(userId, data.category_id);
     return { ...data, category: resolvedSlug };
   }
@@ -168,7 +144,7 @@ export class TransactionsService {
   async delete(userId: string, id: string) {
     const { data: existing } = await this.supabase.db
       .from('Transactions')
-      .select('category_id, date, card_id, amount, type, budget_impact')
+      .select('category_id, date')
       .eq('id', id)
       .eq('user_id', userId)
       .single();
@@ -186,34 +162,6 @@ export class TransactionsService {
     const slug = await this.categories.resolveSlug(userId, existing.category_id as string);
     await this.updateBudgetSpent(userId, existing.category_id as string, slug, existing.date as string);
 
-    if (existing.card_id) {
-      const delta = this.getTransactionDelta(existing.amount as number, existing.type as string, existing.budget_impact as string | undefined);
-      await this.adjustCardBalance(existing.card_id as string, -delta);
-    }
-  }
-
-  private getTransactionDelta(amount: number, type: string, budgetImpact?: string): number {
-    if (type === 'income') return amount;
-    if (type === 'expense') return -amount;
-    if (type === 'transfer') {
-      if (budgetImpact === 'increase') return amount;
-      if (budgetImpact === 'decrease') return -amount;
-    }
-    return 0;
-  }
-
-  private async adjustCardBalance(cardId: string, delta: number) {
-    if (!cardId || delta === 0) return;
-    const { data: card } = await this.supabase.db
-      .from('Cards')
-      .select('balance')
-      .eq('id', cardId)
-      .single();
-    if (!card) return;
-    await this.supabase.db
-      .from('Cards')
-      .update({ balance: (card.balance as number) + delta })
-      .eq('id', cardId);
   }
 
   private async updateBudgetSpent(userId: string, categoryId: string, categorySlug: string, forDate?: string) {
