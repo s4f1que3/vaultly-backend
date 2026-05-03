@@ -3,6 +3,17 @@ import { SupabaseService } from '../common/supabase.service';
 import { CreateCardDto, UpdateCardDto } from './cards.dto';
 
 type DbCard = Record<string, unknown>;
+type TxRow = { card_id: string; amount: unknown; type: string; budget_impact?: string };
+
+function txDelta(amount: number, type: string, budgetImpact?: string): number {
+  if (type === 'income') return amount;
+  if (type === 'expense') return -amount;
+  if (type === 'transfer') {
+    if (budgetImpact === 'increase') return amount;
+    if (budgetImpact === 'decrease') return -amount;
+  }
+  return 0;
+}
 
 function toFrontend(card: DbCard) {
   return {
@@ -37,8 +48,23 @@ export class CardsService {
       .order('created_at', { ascending: true });
     if (error) throw new BadRequestException(error.message);
 
+    const { data: txs } = await this.supabase.db
+      .from('Transactions')
+      .select('card_id, amount, type, budget_impact')
+      .eq('user_id', userId)
+      .not('card_id', 'is', null);
+
+    const deltaMap: Record<string, number> = {};
+    for (const tx of (txs ?? []) as TxRow[]) {
+      const d = txDelta(parseFloat(String(tx.amount)), tx.type, tx.budget_impact);
+      deltaMap[tx.card_id] = (deltaMap[tx.card_id] ?? 0) + d;
+    }
+
     return {
-      data: (cards ?? []).map((card) => toFrontend(card)),
+      data: (cards ?? []).map((card) => {
+        const initial = parseFloat(String(card.balance ?? 0));
+        return toFrontend({ ...card, balance: initial + (deltaMap[card.id as string] ?? 0) });
+      }),
     };
   }
 
