@@ -56,4 +56,13 @@ export class UpdateCardDto {
   @Min(0)
   @Type(() => Number)
   credit_limit?: number;
+
+  @IsOptional()
+  @IsString()
+  expiry_month?: string;
+
+  @IsOptional()
+  @IsString()
+  @Length(4, 4)
+  expiry_year?: string;
 }
