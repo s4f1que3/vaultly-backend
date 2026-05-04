@@ -111,4 +111,32 @@ export class NotificationsService {
       }
     }
   }
+
+  async registerDevice(userId: string, token: string, deviceType: string) {
+    const { error } = await this.supabase.db
+      .from('device_tokens')
+      .upsert({
+        user_id: userId,
+        expo_push_token: token,
+        device_type: deviceType,
+        push_notifications_enabled: true,
+        updated_at: new Date().toISOString(),
+      }, {
+        onConflict: 'user_id,expo_push_token'
+      });
+    
+    if (error) throw new Error(error.message);
+    return { success: true, message: 'Device registered successfully' };
+  }
+
+  async getUserTokens(userId: string) {
+    const { data, error } = await this.supabase.db
+      .from('device_tokens')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('push_notifications_enabled', true);
+    
+    if (error) throw new Error(error.message);
+    return { data: data || [] };
+  }
 }
