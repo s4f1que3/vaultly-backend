@@ -8,8 +8,8 @@ import { SupabaseService } from '../common/supabase.service';
 import { PaypalService } from '../billing/paypal.service';
 import { EmailService } from './email.service';
 
-const LICENSE_PRICE = '400.00';
-const LICENSE_PRICE_NUM = 400;
+const LICENSE_PRICE = '2000.00';
+const LICENSE_PRICE_NUM = 2000;
 
 export interface License {
   id: string;
