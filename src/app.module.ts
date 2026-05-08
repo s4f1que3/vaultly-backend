@@ -3,6 +3,8 @@ import { APP_FILTER, APP_GUARD } from '@nestjs/core';
 import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
 import { AuthModule } from './auth/auth.module';
 import { TransactionsModule } from './transactions/transactions.module';
 import { CardsModule } from './cards/cards.module';
@@ -22,6 +24,7 @@ import { AlertService } from './common/alert.service';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 
 @Module({
+  controllers: [AppController],
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
@@ -43,6 +46,7 @@ import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
     SavingsPotsModule,
   ],
   providers: [
+    AppService,
     AlertService,
     // Guard order: ThrottlerGuard → AuthGuard → SubscriptionGuard (in BillingModule)
     { provide: APP_GUARD, useClass: ThrottlerGuard },
