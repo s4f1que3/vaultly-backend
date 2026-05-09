@@ -23,6 +23,7 @@ import { RecurringTransactionsModule } from './recurring-transactions/recurring-
 import { NetWorthModule } from './net-worth/net-worth.module';
 import { DebtsModule } from './debts/debts.module';
 import { HouseholdsModule } from './households/households.module';
+import { SupabaseService } from './common/supabase.service';
 import { AuthGuard } from './common/guards/auth.guard';
 import { AlertService } from './common/alert.service';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
@@ -56,6 +57,7 @@ import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
   providers: [
     AppService,
     AlertService,
+    SupabaseService,
     // Guard order: ThrottlerGuard → AuthGuard → SubscriptionGuard (in BillingModule)
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: AuthGuard },

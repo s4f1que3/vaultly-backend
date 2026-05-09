@@ -1260,13 +1260,17 @@ export class IntelligenceService {
         total > 0 ? this.round2(total / avg) : null,
       );
 
-      const peakIdx = multipliers.reduce((best, m, i) =>
-        m !== null && (multipliers[best] === null || m > (multipliers[best] ?? 0)) ? i : best, 0);
-      const troughIdx = multipliers.reduce((best, m, i) =>
-        m !== null && (multipliers[best] === null || m < (multipliers[best] ?? Infinity)) ? i : best, 0);
+      let peakIdx = 0;
+      let troughIdx = 0;
+      for (let i = 0; i < multipliers.length; i++) {
+        const m = multipliers[i];
+        if (m === null) continue;
+        if (multipliers[peakIdx] === null || m > (multipliers[peakIdx] as number)) peakIdx = i;
+        if (multipliers[troughIdx] === null || m < (multipliers[troughIdx] as number)) troughIdx = i;
+      }
 
-      const peakMult = multipliers[peakIdx] ?? 1;
-      const troughMult = multipliers[troughIdx] ?? 1;
+      const peakMult = (multipliers[peakIdx] as number | null) ?? 1;
+      const troughMult = (multipliers[troughIdx] as number | null) ?? 1;
 
       // Only flag if variance is meaningful (>20% swing)
       const hasSeasonality = peakMult - troughMult > 0.4;
