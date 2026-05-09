@@ -11,9 +11,11 @@ async function bootstrap() {
   // Security headers
   app.use(helmet());
 
+  const isProd = process.env.NODE_ENV === 'production';
+
   const allowedOrigins = [
-    'http://localhost:3000',
-    'http://localhost:3001',
+    // Only allow localhost in development — in production any machine's localhost could hit this
+    ...(!isProd ? ['http://localhost:3000', 'http://localhost:3001'] : []),
     ...(process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : []),
     ...(process.env.EXTRA_ORIGINS ? process.env.EXTRA_ORIGINS.split(',').map((o) => o.trim()) : []),
   ];

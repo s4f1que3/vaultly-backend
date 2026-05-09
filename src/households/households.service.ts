@@ -1,9 +1,15 @@
 import { BadRequestException, Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../common/supabase.service';
+import { EmailService } from '../licenses/email.service';
 
 @Injectable()
 export class HouseholdsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly email: EmailService,
+    private readonly config: ConfigService,
+  ) {}
 
   async getMyHousehold(userId: string) {
     // User may be owner or member
@@ -68,6 +74,22 @@ export class HouseholdsService {
       .select()
       .single();
     if (error) throw new BadRequestException(error.message);
+
+    // Fetch inviter name and household name for the email
+    const [inviterRes, householdRes] = await Promise.all([
+      this.supabase.db.auth.admin.getUserById(userId),
+      this.supabase.db.from('households').select('name').eq('id', membership.household_id).single(),
+    ]);
+
+    const inviterName = inviterRes.data?.user?.user_metadata?.full_name
+      || inviterRes.data?.user?.email?.split('@')[0]
+      || 'Someone';
+    const householdName = (householdRes.data as { name: string } | null)?.name ?? 'a household';
+    const frontendUrl = this.config.get<string>('FRONTEND_URL') ?? 'https://vaultly.cash';
+
+    // Fire-and-forget — don't block the response if email fails
+    this.email.sendHouseholdInvite(email.toLowerCase(), inviterName, householdName, frontendUrl);
+
     return data;
   }
 

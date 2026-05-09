@@ -8,6 +8,6 @@ import { PaypalService } from '../billing/paypal.service';
 @Module({
   controllers: [LicensesController],
   providers: [LicensesService, EmailService, SupabaseService, PaypalService],
-  exports: [LicensesService],
+  exports: [LicensesService, EmailService],
 })
 export class LicensesModule {}

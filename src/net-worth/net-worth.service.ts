@@ -44,11 +44,13 @@ export class NetWorthService {
   // ── Full Net Worth Calculation ─────────────────────────────────────────────
 
   async getNetWorth(userId: string) {
-    const [cardsRes, potsRes, goalsRes, liabRes] = await Promise.all([
-      this.supabase.db.from('Cards').select('balance, card_holder, last_four').eq('user_id', userId),
+    const [cardsRes, potsRes, goalsRes, liabRes, cardTxsRes] = await Promise.all([
+      this.supabase.db.from('Cards').select('id, balance, card_holder, last_four').eq('user_id', userId),
       this.supabase.db.from('savings_pots').select('name, amount').eq('user_id', userId),
       this.supabase.db.from('Savings').select('name, current_amount').eq('user_id', userId).eq('status', 'active'),
       this.supabase.db.from('liabilities').select('*').eq('user_id', userId),
+      this.supabase.db.from('Transactions').select('card_id, amount, type, budget_impact')
+        .eq('user_id', userId).not('card_id', 'is', null),
     ]);
 
     const cards = cardsRes.data ?? [];
@@ -56,7 +58,17 @@ export class NetWorthService {
     const goals = goalsRes.data ?? [];
     const liabilities = liabRes.data ?? [];
 
-    const cardBalances = cards.reduce((s: number, c: { balance: number }) => s + (c.balance ?? 0), 0);
+    // Apply transaction deltas to card base balances (same logic as Cards service)
+    const deltaMap: Record<string, number> = {};
+    for (const tx of (cardTxsRes.data ?? []) as { card_id: string; amount: number; type: string; budget_impact?: string }[]) {
+      const d = tx.type === 'income' ? tx.amount : tx.type === 'expense' ? -tx.amount
+        : tx.budget_impact === 'increase' ? tx.amount : tx.budget_impact === 'decrease' ? -tx.amount : 0;
+      deltaMap[tx.card_id] = (deltaMap[tx.card_id] ?? 0) + d;
+    }
+
+    const cardBalances = (cards as { id: string; balance: number }[]).reduce(
+      (s, c) => s + (c.balance ?? 0) + (deltaMap[c.id] ?? 0), 0,
+    );
     const savingsPots = pots.reduce((s: number, p: { amount: number }) => s + (p.amount ?? 0), 0);
     const goalSavings = goals.reduce((s: number, g: { current_amount: number }) => s + (g.current_amount ?? 0), 0);
     const totalAssets = cardBalances + savingsPots + goalSavings;
@@ -65,9 +77,9 @@ export class NetWorthService {
     const netWorth = totalAssets - totalLiabilities;
 
     const breakdown: { label: string; amount: number }[] = [
-      ...cards.map((c: { card_holder: string; last_four: string; balance: number }) => ({
+      ...(cards as { id: string; card_holder: string; last_four: string; balance: number }[]).map((c) => ({
         label: `${c.card_holder} ••••${c.last_four}`,
-        amount: c.balance ?? 0,
+        amount: (c.balance ?? 0) + (deltaMap[c.id] ?? 0),
       })),
       ...pots.map((p: { name: string; amount: number }) => ({ label: `Pot: ${p.name}`, amount: p.amount })),
       ...goals.map((g: { name: string; current_amount: number }) => ({ label: `Goal: ${g.name}`, amount: g.current_amount })),

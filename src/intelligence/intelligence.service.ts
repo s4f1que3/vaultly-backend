@@ -50,11 +50,20 @@ export class IntelligenceService {
     const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0)
       .toISOString().split('T')[0];
 
-    // Total balance across all cards
-    const { data: cards } = await this.supabase.db
-      .from('Cards').select('balance').eq('user_id', userId);
+    // Total balance across all cards, adjusted for all transactions
+    const [{ data: cards }, { data: cardTxs }] = await Promise.all([
+      this.supabase.db.from('Cards').select('id, balance').eq('user_id', userId),
+      this.supabase.db.from('Transactions').select('card_id, amount, type, budget_impact')
+        .eq('user_id', userId).not('card_id', 'is', null),
+    ]);
+    const deltaMap: Record<string, number> = {};
+    for (const tx of (cardTxs ?? []) as { card_id: string; amount: number; type: string; budget_impact?: string }[]) {
+      const d = tx.type === 'income' ? tx.amount : tx.type === 'expense' ? -tx.amount
+        : tx.budget_impact === 'increase' ? tx.amount : tx.budget_impact === 'decrease' ? -tx.amount : 0;
+      deltaMap[tx.card_id] = (deltaMap[tx.card_id] ?? 0) + d;
+    }
     const totalBalance = (cards ?? []).reduce(
-      (s: number, c: { balance: number }) => s + (c.balance || 0), 0,
+      (s: number, c: { id: string; balance: number }) => s + (c.balance || 0) + (deltaMap[c.id] ?? 0), 0,
     );
 
     // Upcoming subscriptions due before end of current month
@@ -1084,16 +1093,25 @@ export class IntelligenceService {
     await this.categories.ensureDefaults(userId);
     const today = new Date();
 
-    const [cardsRes, budgetsRes, goalsRes, liabRes, txsRes] = await Promise.all([
-      this.supabase.db.from('Cards').select('balance').eq('user_id', userId),
+    const [cardsRes, budgetsRes, goalsRes, liabRes, txsRes, cardTxsRes] = await Promise.all([
+      this.supabase.db.from('Cards').select('id, balance').eq('user_id', userId),
       this.supabase.db.from('Budgets').select('*')
         .eq('user_id', userId).eq('month', today.getMonth() + 1).eq('year', today.getFullYear()),
       this.supabase.db.from('Savings').select('target_amount, current_amount, status').eq('user_id', userId),
       this.supabase.db.from('liabilities').select('balance').eq('user_id', userId),
       this.supabase.db.from('Transactions').select('amount, type').eq('user_id', userId).gte('date', this.daysAgo(90)),
+      this.supabase.db.from('Transactions').select('card_id, amount, type, budget_impact').eq('user_id', userId).not('card_id', 'is', null),
     ]);
 
-    const totalBalance = (cardsRes.data ?? []).reduce((s: number, c: { balance: number }) => s + (c.balance ?? 0), 0);
+    const hsDeltaMap: Record<string, number> = {};
+    for (const tx of (cardTxsRes.data ?? []) as { card_id: string; amount: number; type: string; budget_impact?: string }[]) {
+      const d = tx.type === 'income' ? tx.amount : tx.type === 'expense' ? -tx.amount
+        : tx.budget_impact === 'increase' ? tx.amount : tx.budget_impact === 'decrease' ? -tx.amount : 0;
+      hsDeltaMap[tx.card_id] = (hsDeltaMap[tx.card_id] ?? 0) + d;
+    }
+    const totalBalance = (cardsRes.data ?? []).reduce(
+      (s: number, c: { id: string; balance: number }) => s + (c.balance ?? 0) + (hsDeltaMap[c.id] ?? 0), 0,
+    );
     const budgets = budgetsRes.data ?? [];
     const goals = goalsRes.data ?? [];
     const totalDebt = (liabRes.data ?? []).reduce((s: number, l: { balance: number }) => s + l.balance, 0);

@@ -45,21 +45,54 @@ export class RecurringTransactionsService {
 
   async findAll(userId: string) {
     await this.categories.ensureDefaults(userId);
-    const { data, error } = await this.supabase.db
-      .from('recurring_transactions')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
 
-    if (error) throw new BadRequestException(error.message);
+    // Fetch both tables in parallel
+    const [recurringRes, subsRes] = await Promise.all([
+      this.supabase.db
+        .from('recurring_transactions')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false }),
+      this.supabase.db
+        .from('Subscriptions')
+        .select('*')
+        .eq('user_id', userId)
+        .order('company'),
+    ]);
 
-    const rows = await Promise.all(
-      (data ?? []).map(async (r: Record<string, unknown>) => ({
+    if (recurringRes.error) throw new BadRequestException(recurringRes.error.message);
+
+    // Map recurring_transactions rows
+    const recurringRows = await Promise.all(
+      (recurringRes.data ?? []).map(async (r: Record<string, unknown>) => ({
         ...r,
+        source: 'recurring',
         category: await this.categories.resolveSlug(userId, r.category_id as string),
       })),
     );
-    return { data: rows };
+
+    // Map Subscriptions to the same display shape
+    const subRows = (subsRes.data ?? []).map((s: Record<string, unknown>) => ({
+      id: s.id,
+      user_id: s.user_id,
+      name: s.company,
+      amount: s.amount,
+      type: 'expense',
+      category: 'general',
+      merchant: s.company,
+      frequency: s.period === 'yearly' ? 'yearly' : 'monthly',
+      day_of_month: s.billing_day,
+      next_due_date: s.next_due_date,
+      last_processed_date: s.last_processed_date,
+      is_active: s.is_active,
+      card_id: s.card_id,
+      icon: s.icon,
+      color: s.color,
+      source: 'subscription',
+      created_at: s.created_at,
+    }));
+
+    return { data: [...recurringRows, ...subRows] };
   }
 
   async create(userId: string, dto: CreateRecurringTransactionDto) {

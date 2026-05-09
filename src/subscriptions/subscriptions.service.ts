@@ -33,7 +33,6 @@ export class SubscriptionsService {
   }
 
   async findAll(userId: string) {
-    await this.processForUser(userId);
     const { data, error } = await this.supabase.db
       .from('Subscriptions')
       .select('*')
@@ -93,7 +92,9 @@ export class SubscriptionsService {
       .select('*')
       .eq('user_id', userId)
       .eq('is_active', true)
-      .lte('next_due_date', today);
+      .lte('next_due_date', today)
+      // Guard: skip anything already processed today — prevents double-fire
+      .or(`last_processed_date.is.null,last_processed_date.lt.${today}`);
 
     if (!due?.length) return;
 

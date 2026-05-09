@@ -218,55 +218,109 @@ export class TransactionsService {
   // ── CSV Import ────────────────────────────────────────────────────────────
 
   parseCSV(csv: string): Record<string, string>[] {
-    const lines = csv.trim().split('\n').filter((l) => l.trim());
+    // Normalise line endings (Windows \r\n, old Mac \r)
+    const normalised = csv.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    const lines = normalised.trim().split('\n').filter((l) => l.trim());
     if (lines.length < 2) throw new BadRequestException('CSV must have a header row and at least one data row');
 
-    const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'));
+    const headers = this.splitCsvLine(lines[0]).map((h) =>
+      h.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
+    );
+
     return lines.slice(1).map((line) => {
-      const values = line.split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
+      const values = this.splitCsvLine(line);
       return Object.fromEntries(headers.map((h, i) => [h, values[i] ?? '']));
     });
   }
 
+  // RFC-4180 aware CSV line splitter: handles quoted fields containing commas/newlines
+  private splitCsvLine(line: string): string[] {
+    const fields: string[] = [];
+    let current = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+        else { inQuotes = !inQuotes; }
+      } else if (ch === ',' && !inQuotes) {
+        fields.push(current.trim());
+        current = '';
+      } else {
+        current += ch;
+      }
+    }
+    fields.push(current.trim());
+    return fields;
+  }
+
   async previewImport(userId: string, csvContent: string) {
     await this.categories.ensureDefaults(userId);
-    const rows = this.parseCSV(csvContent);
 
-    const preview = await Promise.all(rows.map(async (row, i) => {
-      const errors: string[] = [];
+    let rows: Record<string, string>[];
+    try {
+      rows = this.parseCSV(csvContent);
+    } catch (e) {
+      throw new BadRequestException(e instanceof Error ? e.message : 'Invalid CSV format');
+    }
 
-      // Flexible header mapping
-      const dateVal = row.date ?? row.transaction_date ?? row.trans_date ?? '';
-      const amountStr = row.amount ?? row.debit ?? row.credit ?? '';
-      const descVal = row.description ?? row.memo ?? row.name ?? row.payee ?? '';
-      const merchantVal = row.merchant ?? row.payee ?? descVal ?? '';
-      const typeVal = (row.type ?? (parseFloat(amountStr) < 0 ? 'expense' : 'income')).toLowerCase();
+    // Process rows sequentially to avoid hammering the DB with a large Promise.all
+    const preview: object[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      try {
+        const errors: string[] = [];
 
-      const amount = Math.abs(parseFloat(amountStr));
-      if (isNaN(amount) || amount <= 0) errors.push('Invalid amount');
-      if (!dateVal) errors.push('Missing date');
+        // Flexible column name mapping — handles most bank export formats
+        const dateVal = row.date ?? row.transaction_date ?? row.trans_date ?? row.posted_date ?? row.value_date ?? '';
+        const amountRaw = row.amount ?? row.debit ?? row.credit ?? row.transaction_amount ?? '';
+        const descVal = row.description ?? row.memo ?? row.name ?? row.payee ?? row.narrative ?? row.details ?? '';
+        const merchantVal = row.merchant ?? row.payee ?? descVal ?? '';
+        const typeHint = (row.type ?? '').toLowerCase();
 
-      const effectiveType = ['income', 'expense', 'transfer'].includes(typeVal) ? typeVal : (amount < 0 ? 'expense' : 'expense');
-      const suggestedCategory = await this.intelligence.resolveMerchantCategory(userId, merchantVal) ?? 'other';
+        const amountNum = parseFloat(amountRaw.replace(/[$,\s]/g, ''));
+        const amount = Math.abs(amountNum);
 
-      return {
-        _rowIndex: i,
-        _valid: errors.length === 0,
-        _error: errors.join(', ') || undefined,
-        date: dateVal,
-        description: descVal || 'Imported transaction',
-        amount,
-        type: effectiveType,
-        category: suggestedCategory,
-        merchant: merchantVal || undefined,
-      };
-    }));
+        if (isNaN(amount) || amount <= 0) errors.push('Invalid amount');
+        if (!dateVal) errors.push('Missing date');
+
+        // Infer type: explicit > negative amount = expense > positive = income
+        let effectiveType = 'expense';
+        if (['income', 'expense', 'transfer'].includes(typeHint)) effectiveType = typeHint;
+        else effectiveType = amountNum < 0 ? 'expense' : 'income';
+
+        let suggestedCategory = 'other';
+        try {
+          suggestedCategory = (await this.intelligence.resolveMerchantCategory(userId, merchantVal)) ?? 'other';
+        } catch { /* fall back to 'other' if intelligence fails */ }
+
+        preview.push({
+          _rowIndex: i,
+          _valid: errors.length === 0,
+          _error: errors.join(', ') || undefined,
+          date: dateVal,
+          description: descVal || 'Imported transaction',
+          amount,
+          type: effectiveType,
+          category: suggestedCategory,
+          merchant: merchantVal || undefined,
+        });
+      } catch {
+        preview.push({
+          _rowIndex: i,
+          _valid: false,
+          _error: 'Could not parse row',
+          date: '', description: 'Unknown', amount: 0, type: 'expense', category: 'other',
+        });
+      }
+    }
 
     return {
       rows: preview,
       totalRows: preview.length,
-      validRows: preview.filter((r) => r._valid).length,
-      invalidRows: preview.filter((r) => !r._valid).length,
+      validRows: preview.filter((r: object) => (r as Record<string, unknown>)._valid).length,
+      invalidRows: preview.filter((r: object) => !(r as Record<string, unknown>)._valid).length,
     };
   }
 
