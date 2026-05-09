@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { SupabaseService } from '../common/supabase.service';
 import { CategoriesService } from '../categories/categories.service';
 import { IntelligenceService } from '../intelligence/intelligence.service';
+import { HouseholdsService } from '../households/households.service';
 import { CreateTransactionDto, UpdateTransactionDto, TransactionQueryDto } from './transactions.dto';
 
 @Injectable()
@@ -10,18 +11,28 @@ export class TransactionsService {
     private readonly supabase: SupabaseService,
     private readonly categories: CategoriesService,
     private readonly intelligence: IntelligenceService,
+    private readonly households: HouseholdsService,
   ) {}
 
   async findAll(userId: string, query: TransactionQueryDto) {
     const { page = 1, limit = 20, type, category, search, dateFrom, dateTo, cardId, merchant } = query;
     const offset = (page - 1) * limit;
 
+    // Household: include all member transactions
+    const memberIds = await this.households.getMemberIds(userId);
+    const isHousehold = memberIds.length > 1;
+
     let q = this.supabase.db
       .from('Transactions')
       .select('*', { count: 'exact' })
-      .eq('user_id', userId)
       .order('date', { ascending: false })
       .range(offset, offset + limit - 1);
+
+    if (isHousehold) {
+      q = q.in('user_id', memberIds);
+    } else {
+      q = q.eq('user_id', userId);
+    }
 
     if (type) q = q.eq('type', type);
     if (dateFrom) q = q.gte('date', dateFrom);
@@ -39,10 +50,18 @@ export class TransactionsService {
     if (error) throw new BadRequestException(error.message);
 
     await this.categories.ensureDefaults(userId);
+
+    // Build name map once for the whole page
+    const nameMap = isHousehold ? await this.households.getMemberNameMap(userId) : null;
+
     const rows = await Promise.all(
       (data ?? []).map(async (tx: Record<string, unknown>) => ({
         ...tx,
-        category: await this.categories.resolveSlug(userId, tx.category_id as string),
+        category: await this.categories.resolveSlug(tx.user_id as string, tx.category_id as string),
+        ...(isHousehold && {
+          member_name: nameMap?.get(tx.user_id as string) ?? 'Member',
+          is_own: tx.user_id === userId,
+        }),
       })),
     );
 

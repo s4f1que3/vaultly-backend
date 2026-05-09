@@ -35,7 +35,21 @@ export class HouseholdsService {
       .eq('household_id', membership.household_id)
       .eq('status', 'pending');
 
-    return { household, members: members ?? [], invites: invites ?? [], role: membership.role };
+    // Resolve display names for each member
+    const membersWithNames = await Promise.all(
+      (members ?? []).map(async (m: Record<string, unknown>) => {
+        try {
+          const { data } = await this.supabase.db.auth.admin.getUserById(m.user_id as string);
+          return {
+            ...m,
+            name: data?.user?.user_metadata?.full_name || data?.user?.email?.split('@')[0] || 'Member',
+            email: data?.user?.email ?? '',
+          };
+        } catch { return { ...m, name: 'Member', email: '' }; }
+      }),
+    );
+
+    return { household, members: membersWithNames, invites: invites ?? [], role: membership.role };
   }
 
   async createHousehold(userId: string, name: string) {
@@ -153,6 +167,36 @@ export class HouseholdsService {
       .eq('household_id', ownerMembership.household_id);
 
     return { success: true };
+  }
+
+  // ── Shared helpers used by other services ─────────────────────────────────
+
+  async getMemberIds(userId: string): Promise<string[]> {
+    const { data: membership } = await this.supabase.db
+      .from('household_members').select('household_id').eq('user_id', userId).single();
+    if (!membership) return [userId];
+
+    const { data: members } = await this.supabase.db
+      .from('household_members').select('user_id')
+      .eq('household_id', (membership as { household_id: string }).household_id);
+
+    const ids = (members ?? []).map((m: { user_id: string }) => m.user_id);
+    return ids.length > 0 ? ids : [userId];
+  }
+
+  async getMemberNameMap(userId: string): Promise<Map<string, string>> {
+    const memberIds = await this.getMemberIds(userId);
+    const map = new Map<string, string>();
+    await Promise.all(memberIds.map(async (id) => {
+      try {
+        const { data } = await this.supabase.db.auth.admin.getUserById(id);
+        const name = data?.user?.user_metadata?.full_name
+          || data?.user?.email?.split('@')[0]
+          || 'Member';
+        map.set(id, name);
+      } catch { map.set(id, 'Member'); }
+    }));
+    return map;
   }
 
   // Pending invites for the current user's email

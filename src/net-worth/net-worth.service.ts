@@ -45,7 +45,7 @@ export class NetWorthService {
 
   async getNetWorth(userId: string) {
     const [cardsRes, potsRes, goalsRes, liabRes, cardTxsRes] = await Promise.all([
-      this.supabase.db.from('Cards').select('id, balance, card_holder, last_four').eq('user_id', userId),
+      this.supabase.db.from('Cards').select('id, balance, card_holder, last_four, savings_pot_id').eq('user_id', userId),
       this.supabase.db.from('savings_pots').select('name, amount').eq('user_id', userId),
       this.supabase.db.from('Savings').select('name, current_amount').eq('user_id', userId).eq('status', 'active'),
       this.supabase.db.from('liabilities').select('*').eq('user_id', userId),
@@ -66,7 +66,11 @@ export class NetWorthService {
       deltaMap[tx.card_id] = (deltaMap[tx.card_id] ?? 0) + d;
     }
 
-    const cardBalances = (cards as { id: string; balance: number }[]).reduce(
+    // Cards linked to a savings pot are excluded — the pot already represents that money
+    const unlinkedCards = (cards as { id: string; balance: number; savings_pot_id?: string }[])
+      .filter((c) => !c.savings_pot_id);
+
+    const cardBalances = unlinkedCards.reduce(
       (s, c) => s + (c.balance ?? 0) + (deltaMap[c.id] ?? 0), 0,
     );
     const savingsPots = pots.reduce((s: number, p: { amount: number }) => s + (p.amount ?? 0), 0);
@@ -77,8 +81,8 @@ export class NetWorthService {
     const netWorth = totalAssets - totalLiabilities;
 
     const breakdown: { label: string; amount: number }[] = [
-      ...(cards as { id: string; card_holder: string; last_four: string; balance: number }[]).map((c) => ({
-        label: `${c.card_holder} ••••${c.last_four}`,
+      ...unlinkedCards.map((c) => ({
+        label: `${(c as Record<string, unknown>).card_holder as string} ••••${(c as Record<string, unknown>).last_four as string}`,
         amount: (c.balance ?? 0) + (deltaMap[c.id] ?? 0),
       })),
       ...pots.map((p: { name: string; amount: number }) => ({ label: `Pot: ${p.name}`, amount: p.amount })),

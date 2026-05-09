@@ -65,4 +65,8 @@ export class UpdateCardDto {
   @IsString()
   @Length(4, 4)
   expiry_year?: string;
+
+  @IsOptional()
+  @IsString()
+  savings_pot_id?: string | null;
 }

@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../common/supabase.service';
 import { CategoriesService } from '../categories/categories.service';
+import { HouseholdsService } from '../households/households.service';
 import { CreateBudgetDto, UpdateBudgetDto } from './budgets.dto';
 
 @Injectable()
@@ -9,6 +10,7 @@ export class BudgetsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly categories: CategoriesService,
+    private readonly households: HouseholdsService,
   ) {}
 
   private currentMonthYear() {
@@ -32,13 +34,45 @@ export class BudgetsService {
     if (error) throw new BadRequestException(error.message);
 
     await this.categories.ensureDefaults(userId);
+
+    const memberIds = await this.households.getMemberIds(userId);
+    const isHousehold = memberIds.length > 1;
+
+    const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+    const endDate = new Date(year, month, 0).toISOString().split('T')[0];
+
     const rows = await Promise.all(
-      (data ?? []).map(async (b: Record<string, unknown>) => ({
-        ...b,
-        category: await this.categories.resolveSlug(userId, b.category_id as string),
-        period: 'monthly',
-      })),
+      (data ?? []).map(async (b: Record<string, unknown>) => {
+        const category = await this.categories.resolveSlug(userId, b.category_id as string);
+
+        if (!isHousehold) {
+          return { ...b, category, period: 'monthly' };
+        }
+
+        // Aggregate spending across all household members for this category + month
+        const { data: txs } = await this.supabase.db
+          .from('Transactions')
+          .select('amount')
+          .in('user_id', memberIds)
+          .eq('type', 'expense')
+          .eq('category_id', b.category_id as string)
+          .gte('date', startDate)
+          .lte('date', endDate);
+
+        const householdSpent = (txs ?? []).reduce(
+          (s: number, t: { amount: number }) => s + (t.amount ?? 0), 0,
+        );
+
+        return {
+          ...b,
+          category,
+          period: 'monthly',
+          spent_amount: Math.round(householdSpent * 100) / 100,
+          is_household: true,
+        };
+      }),
     );
+
     return { data: rows };
   }
 
