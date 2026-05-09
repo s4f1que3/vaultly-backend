@@ -63,7 +63,8 @@ export class CardsService {
     return {
       data: (cards ?? []).map((card) => {
         const initial = parseFloat(String(card.balance ?? 0));
-        return toFrontend({ ...card, balance: initial + (deltaMap[card.id as string] ?? 0) });
+        const computed = initial + (deltaMap[card.id as string] ?? 0);
+        return toFrontend({ ...card, balance: Math.round(computed * 100) / 100 });
       }),
     };
   }

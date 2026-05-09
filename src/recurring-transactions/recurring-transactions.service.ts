@@ -163,7 +163,7 @@ export class RecurringTransactionsService {
         continue;
       }
 
-      // Insert the actual transaction
+      // Insert primary transaction
       await this.supabase.db.from('Transactions').insert({
         user_id: rec.user_id,
         amount: rec.amount,
@@ -174,6 +174,22 @@ export class RecurringTransactionsService {
         merchant: rec.merchant,
         date: rec.next_due_date,
       });
+
+      // Insert linked transaction if configured
+      if (rec.linked_category && rec.linked_type) {
+        try {
+          const linkedCategoryId = await this.categories.resolveId(rec.user_id, rec.linked_category);
+          await this.supabase.db.from('Transactions').insert({
+            user_id: rec.user_id,
+            amount: rec.amount,
+            type: rec.linked_type,
+            budget_impact: rec.linked_budget_impact ?? null,
+            category_id: linkedCategoryId,
+            description: `${rec.description ?? rec.name} (linked)`,
+            date: rec.next_due_date,
+          });
+        } catch { /* skip linked tx if category resolution fails */ }
+      }
 
       // Advance next_due_date
       const nextDue = this.computeNextDue(

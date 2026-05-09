@@ -1,10 +1,16 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../common/supabase.service';
+import { RecurringTransactionsService } from '../recurring-transactions/recurring-transactions.service';
+import { CategoriesService } from '../categories/categories.service';
 import { CreateLiabilityDto, UpdateLiabilityDto } from './net-worth.dto';
 
 @Injectable()
 export class NetWorthService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly recurring: RecurringTransactionsService,
+    private readonly categories: CategoriesService,
+  ) {}
 
   private round2(n: number) { return Math.round(n * 100) / 100; }
 
@@ -21,7 +27,30 @@ export class NetWorthService {
     const { data, error } = await this.supabase.db
       .from('liabilities').insert({ ...dto, user_id: userId }).select().single();
     if (error) throw new BadRequestException(error.message);
-    return data;
+
+    const liability = data as Record<string, unknown>;
+
+    // Auto-create a monthly recurring transaction for the payment if a budget category was chosen
+    if (dto.budget_category && dto.minimum_payment > 0) {
+      try {
+        await this.categories.ensureDefaults(userId);
+        const rec = await this.recurring.create(userId, {
+          name: `${dto.name} payment`,
+          amount: dto.minimum_payment,
+          type: 'expense',
+          category: dto.budget_category,
+          frequency: 'monthly',
+          start_date: dto.start_date ?? new Date().toISOString().split('T')[0],
+        });
+        await this.supabase.db
+          .from('liabilities')
+          .update({ recurring_transaction_id: (rec as Record<string, unknown>).id })
+          .eq('id', liability.id as string);
+        return { ...liability, recurring_transaction_id: (rec as Record<string, unknown>).id };
+      } catch { /* non-fatal — return liability without recurring link */ }
+    }
+
+    return liability;
   }
 
   async updateLiability(userId: string, id: string, dto: UpdateLiabilityDto) {
@@ -36,6 +65,13 @@ export class NetWorthService {
   }
 
   async deleteLiability(userId: string, id: string) {
+    // Delete associated recurring transaction first
+    const { data: existing } = await this.supabase.db
+      .from('liabilities').select('recurring_transaction_id').eq('id', id).eq('user_id', userId).single();
+    if (existing?.recurring_transaction_id) {
+      try { await this.recurring.delete(userId, existing.recurring_transaction_id); } catch { /* ignore */ }
+    }
+
     const { error } = await this.supabase.db
       .from('liabilities').delete().eq('id', id).eq('user_id', userId);
     if (error) throw new BadRequestException(error.message);

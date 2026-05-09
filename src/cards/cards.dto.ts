@@ -34,6 +34,10 @@ export class CreateCardDto {
   @Min(0)
   @Type(() => Number)
   credit_limit: number;
+
+  @IsOptional()
+  @IsString()
+  savings_pot_id?: string | null;
 }
 
 export class UpdateCardDto {
