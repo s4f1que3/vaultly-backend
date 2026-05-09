@@ -29,4 +29,27 @@ export class SavingsPotsController {
   delete(@CurrentUser() user: User, @Param('id') id: string) {
     return this.service.delete(user.id, id);
   }
+
+  // ── Savings Rules ──────────────────────────────────────────────────────────
+
+  @Get('rules')
+  getRules(@CurrentUser() user: User) { return this.service.getRules(user.id); }
+
+  @Post('rules')
+  createRule(@CurrentUser() user: User, @Body() body: {
+    pot_id: string; name: string; trigger_type: string;
+    amount?: number; percentage?: number; day_of_month?: number;
+  }) {
+    return this.service.createRule(user.id, body);
+  }
+
+  @Patch('rules/:id')
+  updateRule(@CurrentUser() user: User, @Param('id') id: string, @Body() body: object) {
+    return this.service.updateRule(user.id, id, body);
+  }
+
+  @Delete('rules/:id')
+  deleteRule(@CurrentUser() user: User, @Param('id') id: string) {
+    return this.service.deleteRule(user.id, id);
+  }
 }

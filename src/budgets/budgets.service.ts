@@ -145,9 +145,20 @@ export class BudgetsService {
     };
   }
 
+  async toggleRollover(userId: string, id: string, enabled: boolean) {
+    const { data: existing } = await this.supabase.db
+      .from('Budgets').select('id').eq('id', id).eq('user_id', userId).single();
+    if (!existing) throw new NotFoundException('Budget not found');
+
+    const { data, error } = await this.supabase.db
+      .from('Budgets').update({ rollover_enabled: enabled }).eq('id', id).eq('user_id', userId).select().single();
+    if (error) throw new BadRequestException(error.message);
+    return data;
+  }
+
   // ── Monthly rollover ──────────────────────────────────────────────────────
   // Runs at midnight on the 1st of every month.
-  // Copies last month's budget limits into new rows for the current month.
+  // Copies last month's budget limits into new rows; carries unspent amounts if rollover_enabled.
 
   @Cron('0 0 1 * *')
   async rolloverAllUsers() {
@@ -166,7 +177,6 @@ export class BudgetsService {
     if (!lastMonth?.length) return;
 
     for (const budget of lastMonth) {
-      // Skip if this user+category already has a row for the new month
       const { data: exists } = await this.supabase.db
         .from('Budgets')
         .select('id')
@@ -177,11 +187,15 @@ export class BudgetsService {
         .single();
 
       if (!exists) {
+        const unspent = Math.max(0, (budget.limit_amount ?? 0) - (budget.spent_amount ?? 0));
+        const rollover_amount = budget.rollover_enabled ? unspent : 0;
         await this.supabase.db.from('Budgets').insert({
           user_id: budget.user_id,
           category_id: budget.category_id,
           limit_amount: budget.limit_amount,
           alert_threshold: budget.alert_threshold,
+          rollover_enabled: budget.rollover_enabled ?? false,
+          rollover_amount,
           month: curMonth,
           year: curYear,
           spent_amount: 0,
@@ -219,11 +233,15 @@ export class BudgetsService {
         .single();
 
       if (!exists) {
+        const unspent = Math.max(0, (budget.limit_amount ?? 0) - (budget.spent_amount ?? 0));
+        const rollover_amount = budget.rollover_enabled ? unspent : 0;
         await this.supabase.db.from('Budgets').insert({
           user_id: userId,
           category_id: budget.category_id,
           limit_amount: budget.limit_amount,
           alert_threshold: budget.alert_threshold,
+          rollover_enabled: budget.rollover_enabled ?? false,
+          rollover_amount,
           month: curMonth,
           year: curYear,
           spent_amount: 0,

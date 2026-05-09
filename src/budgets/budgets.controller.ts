@@ -27,6 +27,11 @@ export class BudgetsController {
   @Patch(':id')
   update(@CurrentUser() user: User, @Param('id') id: string, @Body() dto: UpdateBudgetDto) { return this.service.update(user.id, id, dto); }
 
+  @Patch(':id/rollover')
+  toggleRollover(@CurrentUser() user: User, @Param('id') id: string, @Body() body: { enabled: boolean }) {
+    return this.service.toggleRollover(user.id, id, body.enabled);
+  }
+
   @Delete(':id')
   delete(@CurrentUser() user: User, @Param('id') id: string) { return this.service.delete(user.id, id); }
 }

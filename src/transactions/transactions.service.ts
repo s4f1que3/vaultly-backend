@@ -161,7 +161,152 @@ export class TransactionsService {
 
     const slug = await this.categories.resolveSlug(userId, existing.category_id as string);
     await this.updateBudgetSpent(userId, existing.category_id as string, slug, existing.date as string);
+  }
 
+  // ── Split Transactions ────────────────────────────────────────────────────
+
+  async getSplits(userId: string, transactionId: string) {
+    const { data: tx } = await this.supabase.db
+      .from('Transactions').select('id').eq('id', transactionId).eq('user_id', userId).single();
+    if (!tx) throw new NotFoundException('Transaction not found');
+
+    const { data, error } = await this.supabase.db
+      .from('transaction_splits').select('*').eq('transaction_id', transactionId);
+    if (error) throw new BadRequestException(error.message);
+
+    await this.categories.ensureDefaults(userId);
+    const rows = await Promise.all(
+      (data ?? []).map(async (s: Record<string, unknown>) => ({
+        ...s,
+        category: await this.categories.resolveSlug(userId, s.category_id as string),
+      })),
+    );
+    return { data: rows };
+  }
+
+  async setSplits(userId: string, transactionId: string, splits: { category: string; amount: number; note?: string }[]) {
+    const { data: tx } = await this.supabase.db
+      .from('Transactions').select('id, amount').eq('id', transactionId).eq('user_id', userId).single();
+    if (!tx) throw new NotFoundException('Transaction not found');
+
+    const total = splits.reduce((s, sp) => s + sp.amount, 0);
+    if (Math.abs(total - (tx as { amount: number }).amount) > 0.01) {
+      throw new BadRequestException(`Split amounts (${total}) must equal transaction amount (${(tx as { amount: number }).amount})`);
+    }
+
+    await this.categories.ensureDefaults(userId);
+    const splitRows = await Promise.all(
+      splits.map(async (sp) => ({
+        transaction_id: transactionId,
+        category_id: await this.categories.resolveId(userId, sp.category),
+        amount: sp.amount,
+        note: sp.note,
+      })),
+    );
+
+    // Replace existing splits atomically
+    await this.supabase.db.from('transaction_splits').delete().eq('transaction_id', transactionId);
+    const { error } = await this.supabase.db.from('transaction_splits').insert(splitRows);
+    if (error) throw new BadRequestException(error.message);
+
+    // Mark transaction as split
+    await this.supabase.db.from('Transactions').update({ is_split: true }).eq('id', transactionId);
+
+    return this.getSplits(userId, transactionId);
+  }
+
+  // ── CSV Import ────────────────────────────────────────────────────────────
+
+  parseCSV(csv: string): Record<string, string>[] {
+    const lines = csv.trim().split('\n').filter((l) => l.trim());
+    if (lines.length < 2) throw new BadRequestException('CSV must have a header row and at least one data row');
+
+    const headers = lines[0].split(',').map((h) => h.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_'));
+    return lines.slice(1).map((line) => {
+      const values = line.split(',').map((v) => v.trim().replace(/^"|"$/g, ''));
+      return Object.fromEntries(headers.map((h, i) => [h, values[i] ?? '']));
+    });
+  }
+
+  async previewImport(userId: string, csvContent: string) {
+    await this.categories.ensureDefaults(userId);
+    const rows = this.parseCSV(csvContent);
+
+    const preview = await Promise.all(rows.map(async (row, i) => {
+      const errors: string[] = [];
+
+      // Flexible header mapping
+      const dateVal = row.date ?? row.transaction_date ?? row.trans_date ?? '';
+      const amountStr = row.amount ?? row.debit ?? row.credit ?? '';
+      const descVal = row.description ?? row.memo ?? row.name ?? row.payee ?? '';
+      const merchantVal = row.merchant ?? row.payee ?? descVal ?? '';
+      const typeVal = (row.type ?? (parseFloat(amountStr) < 0 ? 'expense' : 'income')).toLowerCase();
+
+      const amount = Math.abs(parseFloat(amountStr));
+      if (isNaN(amount) || amount <= 0) errors.push('Invalid amount');
+      if (!dateVal) errors.push('Missing date');
+
+      const effectiveType = ['income', 'expense', 'transfer'].includes(typeVal) ? typeVal : (amount < 0 ? 'expense' : 'expense');
+      const suggestedCategory = await this.intelligence.resolveMerchantCategory(userId, merchantVal) ?? 'other';
+
+      return {
+        _rowIndex: i,
+        _valid: errors.length === 0,
+        _error: errors.join(', ') || undefined,
+        date: dateVal,
+        description: descVal || 'Imported transaction',
+        amount,
+        type: effectiveType,
+        category: suggestedCategory,
+        merchant: merchantVal || undefined,
+      };
+    }));
+
+    return {
+      rows: preview,
+      totalRows: preview.length,
+      validRows: preview.filter((r) => r._valid).length,
+      invalidRows: preview.filter((r) => !r._valid).length,
+    };
+  }
+
+  async confirmImport(userId: string, rows: {
+    date: string; description: string; amount: number;
+    type: string; category: string; merchant?: string;
+  }[]) {
+    await this.categories.ensureDefaults(userId);
+    let imported = 0;
+
+    for (const row of rows) {
+      try {
+        const category_id = await this.categories.resolveId(userId, row.category);
+        await this.supabase.db.from('Transactions').insert({
+          user_id: userId,
+          amount: row.amount,
+          type: row.type,
+          category_id,
+          description: row.description,
+          merchant: row.merchant,
+          date: row.date,
+        });
+        await this.updateBudgetSpent(userId, category_id, row.category, row.date);
+        imported++;
+      } catch {
+        // Skip invalid rows silently
+      }
+    }
+
+    return { imported, total: rows.length };
+  }
+
+  async deleteSplits(userId: string, transactionId: string) {
+    const { data: tx } = await this.supabase.db
+      .from('Transactions').select('id').eq('id', transactionId).eq('user_id', userId).single();
+    if (!tx) throw new NotFoundException('Transaction not found');
+
+    await this.supabase.db.from('transaction_splits').delete().eq('transaction_id', transactionId);
+    await this.supabase.db.from('Transactions').update({ is_split: false }).eq('id', transactionId);
+    return { success: true };
   }
 
   private async updateBudgetSpent(userId: string, categoryId: string, categorySlug: string, forDate?: string) {

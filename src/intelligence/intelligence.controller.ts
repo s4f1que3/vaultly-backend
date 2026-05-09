@@ -51,4 +51,40 @@ export class IntelligenceController {
   suggestCategory(@CurrentUser() user: User, @Body() dto: CategorySuggestDto) {
     return this.intelligence.resolveMerchantCategory(user.id, dto.merchant);
   }
+
+  /** Spending anomaly detection: price spikes, new recurring charges, large transactions */
+  @Get('anomalies')
+  getAnomalies(@CurrentUser() user: User) {
+    return this.intelligence.getAnomalies(user.id);
+  }
+
+  /** Weighted moving average forecast per category + current month pace */
+  @Get('forecast')
+  getSpendingForecast(@CurrentUser() user: User) {
+    return this.intelligence.getSpendingForecast(user.id);
+  }
+
+  /** Predictive budget alerts — fires before overspend, not after */
+  @Get('predictive-alerts')
+  getPredictiveAlerts(@CurrentUser() user: User) {
+    return this.intelligence.getPredictiveBudgetAlerts(user.id);
+  }
+
+  /** Goal feasibility: realistic / tight / unreachable based on current savings rate */
+  @Get('goal-feasibility')
+  getGoalFeasibility(@CurrentUser() user: User) {
+    return this.intelligence.getGoalFeasibility(user.id);
+  }
+
+  /** 0–100 financial health score across savings rate, budgets, emergency fund, goals, debt */
+  @Get('health-score')
+  getHealthScore(@CurrentUser() user: User) {
+    return this.intelligence.getHealthScore(user.id);
+  }
+
+  /** Seasonality model — monthly spend multipliers per category */
+  @Get('seasonality')
+  getSeasonality(@CurrentUser() user: User) {
+    return this.intelligence.getSeasonality(user.id);
+  }
 }

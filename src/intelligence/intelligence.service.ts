@@ -665,7 +665,647 @@ export class IntelligenceService {
     };
   }
 
-  // ─── 7. Auto-Categorization ───────────────────────────────────────────────
+  // ─── 7. Spending Anomaly Detection ───────────────────────────────────────
+  // Flags price spikes, new recurring charges, large transactions
+
+  async getAnomalies(userId: string) {
+    await this.categories.ensureDefaults(userId);
+    const anomalies: {
+      type: string; severity: string; title: string; description: string;
+      amount: number; merchant?: string; date: string; category?: string;
+    }[] = [];
+
+    const thirtyDaysAgo = this.daysAgo(30);
+    const sixtyDaysAgo = this.daysAgo(60);
+
+    const { data: recentTxs } = await this.supabase.db
+      .from('Transactions').select('*').eq('user_id', userId).gte('date', thirtyDaysAgo);
+    const { data: prevTxs } = await this.supabase.db
+      .from('Transactions').select('*').eq('user_id', userId)
+      .gte('date', sixtyDaysAgo).lt('date', thirtyDaysAgo);
+
+    // 1. Price spikes: merchant charged >50% more than their prior 30-day average
+    const prevMerchant = new Map<string, { total: number; count: number }>();
+    for (const tx of prevTxs ?? []) {
+      if (!tx.merchant) continue;
+      const curr = prevMerchant.get(tx.merchant) ?? { total: 0, count: 0 };
+      prevMerchant.set(tx.merchant, { total: curr.total + tx.amount, count: curr.count + 1 });
+    }
+    for (const tx of recentTxs ?? []) {
+      if (!tx.merchant) continue;
+      const prev = prevMerchant.get(tx.merchant);
+      if (prev && prev.count > 0) {
+        const avgPrev = prev.total / prev.count;
+        if (tx.amount > avgPrev * 1.5 && tx.amount - avgPrev > 10) {
+          anomalies.push({
+            type: 'price_spike', severity: tx.amount > avgPrev * 2 ? 'high' : 'medium',
+            title: `Price spike at ${tx.merchant}`,
+            description: `Charged $${tx.amount.toFixed(2)} — ${Math.round((tx.amount / avgPrev - 1) * 100)}% above your usual $${avgPrev.toFixed(2)}`,
+            amount: tx.amount, merchant: tx.merchant, date: tx.date,
+            category: await this.categories.resolveSlug(userId, tx.category_id),
+          });
+        }
+      }
+    }
+
+    // 2. New recurring charges: merchant 2+ times in last 30d, never before
+    const recentMerchantCounts = new Map<string, number>();
+    for (const tx of recentTxs ?? []) {
+      if (!tx.merchant || tx.type !== 'expense') continue;
+      recentMerchantCounts.set(tx.merchant, (recentMerchantCounts.get(tx.merchant) ?? 0) + 1);
+    }
+    const prevMerchantNames = new Set((prevTxs ?? []).map((t: { merchant: string }) => t.merchant).filter(Boolean));
+    for (const [merchant, count] of recentMerchantCounts) {
+      if (count >= 2 && !prevMerchantNames.has(merchant)) {
+        const latestTx = (recentTxs ?? []).find((t: { merchant: string }) => t.merchant === merchant);
+        anomalies.push({
+          type: 'new_recurring', severity: 'medium',
+          title: `New recurring charge: ${merchant}`,
+          description: `Charged ${count} times in the last 30 days — new merchant not seen before`,
+          amount: latestTx?.amount ?? 0, merchant, date: latestTx?.date ?? new Date().toISOString(),
+        });
+      }
+    }
+
+    // 3. Large transaction: single expense > 5× average daily spend
+    const avgDailySpend = (recentTxs ?? [])
+      .filter((t: { type: string }) => t.type === 'expense')
+      .reduce((s: number, t: { amount: number }) => s + t.amount, 0) / 30;
+    for (const tx of (recentTxs ?? []).filter((t: { type: string; amount: number }) => t.type === 'expense' && t.amount > 100)) {
+      if (avgDailySpend > 0 && tx.amount > avgDailySpend * 5) {
+        anomalies.push({
+          type: 'large_transaction', severity: tx.amount > avgDailySpend * 10 ? 'high' : 'medium',
+          title: 'Large transaction',
+          description: `$${tx.amount.toFixed(2)} — ${Math.round(tx.amount / avgDailySpend)}× your daily average`,
+          amount: tx.amount, merchant: tx.merchant, date: tx.date,
+          category: await this.categories.resolveSlug(userId, tx.category_id),
+        });
+      }
+    }
+
+    const severityOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+    anomalies.sort((a, b) =>
+      (severityOrder[a.severity] ?? 2) - (severityOrder[b.severity] ?? 2) || b.date.localeCompare(a.date),
+    );
+
+    return { anomalies, total: anomalies.length };
+  }
+
+  // ─── 8. Spending Forecaster ──────────────────────────────────────────────
+  // Weighted moving average (recent months weighted higher) per category.
+  // Returns predicted next-month spend + pace vs current month so far.
+
+  async getSpendingForecast(userId: string) {
+    await this.categories.ensureDefaults(userId);
+
+    const { data: txs } = await this.supabase.db
+      .from('Transactions')
+      .select('amount, date, category_id')
+      .eq('user_id', userId)
+      .eq('type', 'expense')
+      .gte('date', this.daysAgo(180));
+
+    // Group by category + YYYY-MM
+    const byCategory = new Map<string, Map<string, number>>();
+    for (const tx of txs ?? []) {
+      const slug = await this.categories.resolveSlug(userId, tx.category_id);
+      const month = (tx.date as string).slice(0, 7);
+      if (!byCategory.has(slug)) byCategory.set(slug, new Map());
+      byCategory.get(slug)!.set(month, (byCategory.get(slug)!.get(month) ?? 0) + tx.amount);
+    }
+
+    // Current month progress for pace calculation
+    const today = new Date();
+    const dayOfMonth = today.getDate();
+    const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+    const monthElapsed = dayOfMonth / daysInMonth;
+    const currentMonthKey = today.toISOString().slice(0, 7);
+
+    const forecasts: {
+      category: string;
+      forecastedAmount: number;
+      currentMonthSpend: number;
+      projectedCurrentMonth: number;
+      pace: 'ahead' | 'behind' | 'on_track';
+      pacePercent: number;
+      monthlyHistory: { month: string; amount: number }[];
+    }[] = [];
+
+    // Weights: most recent month = 3, two months ago = 2, older = 1
+    const WEIGHTS = [3, 2, 1, 1, 1, 1];
+
+    for (const [category, monthMap] of byCategory) {
+      const sorted = [...monthMap.entries()]
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .filter(([m]) => m !== currentMonthKey); // exclude current in-progress month
+
+      if (sorted.length === 0) continue;
+
+      const recent = sorted.slice(-6).reverse(); // most recent first
+      let weightedSum = 0;
+      let weightTotal = 0;
+      for (let i = 0; i < recent.length; i++) {
+        const w = WEIGHTS[i] ?? 1;
+        weightedSum += recent[i][1] * w;
+        weightTotal += w;
+      }
+      const forecastedAmount = this.round2(weightedSum / weightTotal);
+
+      const currentMonthSpend = monthMap.get(currentMonthKey) ?? 0;
+      const projectedCurrentMonth = monthElapsed > 0
+        ? this.round2(currentMonthSpend / monthElapsed)
+        : 0;
+
+      const pacePercent = forecastedAmount > 0
+        ? Math.round(((projectedCurrentMonth - forecastedAmount) / forecastedAmount) * 100)
+        : 0;
+
+      forecasts.push({
+        category,
+        forecastedAmount,
+        currentMonthSpend: this.round2(currentMonthSpend),
+        projectedCurrentMonth,
+        pace: pacePercent > 10 ? 'ahead' : pacePercent < -10 ? 'behind' : 'on_track',
+        pacePercent,
+        monthlyHistory: sorted.slice(-6).map(([month, amount]) => ({ month, amount: this.round2(amount) })),
+      });
+    }
+
+    forecasts.sort((a, b) => b.forecastedAmount - a.forecastedAmount);
+
+    const totalForecast = this.round2(forecasts.reduce((s, f) => s + f.forecastedAmount, 0));
+    const totalCurrentProjected = this.round2(forecasts.reduce((s, f) => s + f.projectedCurrentMonth, 0));
+
+    return {
+      forecasts,
+      summary: {
+        totalForecastedMonthly: totalForecast,
+        totalCurrentProjected,
+        overallPacePercent: totalForecast > 0
+          ? Math.round(((totalCurrentProjected - totalForecast) / totalForecast) * 100)
+          : 0,
+        monthElapsedPercent: Math.round(monthElapsed * 100),
+      },
+    };
+  }
+
+  // ─── 9. Predictive Budget Alerts ─────────────────────────────────────────
+  // Uses spending pace to predict which budgets will be breached before month end,
+  // and by how much — fires before the damage is done.
+
+  async getPredictiveBudgetAlerts(userId: string) {
+    await this.categories.ensureDefaults(userId);
+
+    const today = new Date();
+    const dayOfMonth = today.getDate();
+    const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+    const daysLeft = daysInMonth - dayOfMonth;
+    const monthElapsed = dayOfMonth / daysInMonth;
+
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().split('T')[0];
+    const { data: budgets } = await this.supabase.db
+      .from('Budgets')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('month', today.getMonth() + 1)
+      .eq('year', today.getFullYear());
+
+    const alerts: {
+      category: string;
+      severity: 'warning' | 'danger' | 'critical';
+      currentSpend: number;
+      limit: number;
+      projectedSpend: number;
+      projectedOverageAmount: number;
+      projectedOveragePercent: number;
+      daysLeft: number;
+      message: string;
+    }[] = [];
+
+    for (const budget of budgets ?? []) {
+      if (!budget.limit_amount || budget.limit_amount <= 0) continue;
+
+      const slug = await this.categories.resolveSlug(userId, budget.category_id);
+      const spent = budget.spent_amount ?? 0;
+      const effectiveLimit = (budget.limit_amount ?? 0) + (budget.rollover_amount ?? 0);
+
+      // Current utilization
+      const utilization = spent / effectiveLimit;
+
+      // If already exceeded, that's handled by regular budget alerts — skip
+      if (utilization >= 1) continue;
+
+      // Project spend to end of month based on current pace
+      const projectedSpend = monthElapsed > 0 ? spent / monthElapsed : spent;
+      const projectedOverage = projectedSpend - effectiveLimit;
+
+      if (projectedOverage > 0) {
+        const overagePct = Math.round((projectedOverage / effectiveLimit) * 100);
+        alerts.push({
+          category: slug,
+          severity: overagePct > 25 ? 'critical' : overagePct > 10 ? 'danger' : 'warning',
+          currentSpend: this.round2(spent),
+          limit: this.round2(effectiveLimit),
+          projectedSpend: this.round2(projectedSpend),
+          projectedOverageAmount: this.round2(projectedOverage),
+          projectedOveragePercent: overagePct,
+          daysLeft,
+          message: `At your current pace you'll exceed your ${slug} budget by ${this.round2(projectedOverage).toFixed(0)} (${overagePct}% over) — ${daysLeft} days left`,
+        });
+      } else if (utilization >= 0.7 && daysLeft <= 10) {
+        // Close to limit with little time left
+        const remaining = this.round2(effectiveLimit - spent);
+        alerts.push({
+          category: slug,
+          severity: 'warning',
+          currentSpend: this.round2(spent),
+          limit: this.round2(effectiveLimit),
+          projectedSpend: this.round2(projectedSpend),
+          projectedOverageAmount: 0,
+          projectedOveragePercent: 0,
+          daysLeft,
+          message: `Only ${remaining.toFixed(0)} left in ${slug} budget with ${daysLeft} days to go`,
+        });
+      }
+    }
+
+    const severityOrder = { critical: 0, danger: 1, warning: 2 };
+    alerts.sort((a, b) => severityOrder[a.severity] - severityOrder[b.severity]);
+
+    // Persist critical/danger alerts as notifications (deduplicated by day)
+    const todayStr = today.toISOString().split('T')[0];
+    for (const alert of alerts.filter((a) => a.severity !== 'warning')) {
+      const { data: existing } = await this.supabase.db
+        .from('Notifications')
+        .select('id')
+        .eq('user_id', userId)
+        .eq('type', 'budget_alert')
+        .ilike('title', `%${alert.category}%predictive%`)
+        .gte('created_at', todayStr)
+        .single();
+
+      if (!existing) {
+        await this.supabase.db.from('Notifications').insert({
+          user_id: userId,
+          type: 'budget_alert',
+          title: `Predictive alert: ${alert.category}`,
+          body: alert.message,
+          is_read: false,
+        });
+      }
+    }
+
+    return { alerts, total: alerts.length };
+  }
+
+  // ─── 10. Goal Feasibility Scorer ──────────────────────────────────────────
+  // Rates each active goal: realistic / tight / unreachable based on current savings rate.
+
+  async getGoalFeasibility(userId: string) {
+    const today = new Date();
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).toISOString().split('T')[0];
+
+    const [goalsRes, txsRes] = await Promise.all([
+      this.supabase.db.from('Savings').select('*').eq('user_id', userId).eq('status', 'active'),
+      this.supabase.db.from('Transactions').select('amount, type').eq('user_id', userId).gte('date', this.daysAgo(90)),
+    ]);
+
+    const goals = goalsRes.data ?? [];
+    const txs = txsRes.data ?? [];
+
+    // 3-month average monthly net savings
+    const totalIncome = txs.filter((t: { type: string }) => t.type === 'income')
+      .reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const totalExpenses = txs.filter((t: { type: string }) => t.type === 'expense')
+      .reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const avgMonthlySavings = (totalIncome - totalExpenses) / 3;
+
+    // Total monthly savings commitment across all goals with deadlines
+    const goalCommitments = goals
+      .filter((g: { deadline: string }) => g.deadline)
+      .reduce((s: number, g: { target_amount: number; current_amount: number; deadline: string }) => {
+        const monthsLeft = Math.max(1,
+          (new Date(g.deadline).getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 30),
+        );
+        return s + Math.max(0, (g.target_amount - g.current_amount) / monthsLeft);
+      }, 0);
+
+    const results = goals.map((goal: {
+      id: string; name: string; target_amount: number; current_amount: number;
+      deadline?: string; icon?: string; color?: string;
+    }) => {
+      const remaining = goal.target_amount - goal.current_amount;
+      const progressPct = goal.target_amount > 0
+        ? Math.round((goal.current_amount / goal.target_amount) * 100)
+        : 0;
+
+      if (!goal.deadline) {
+        // No deadline — just show months at current rate
+        const monthsNeeded = avgMonthlySavings > 0
+          ? Math.ceil(remaining / avgMonthlySavings)
+          : null;
+        return {
+          goalId: goal.id,
+          name: goal.name,
+          icon: goal.icon,
+          color: goal.color,
+          target: goal.target_amount,
+          current: goal.current_amount,
+          remaining: this.round2(remaining),
+          progressPct,
+          deadline: null,
+          feasibility: 'no_deadline' as const,
+          monthsNeeded,
+          monthlySavingsRequired: null,
+          shortfallPerMonth: null,
+          message: monthsNeeded
+            ? `At your current savings rate, you'd reach this in ~${monthsNeeded} month${monthsNeeded !== 1 ? 's' : ''}`
+            : 'Set a deadline to get a feasibility score',
+        };
+      }
+
+      const deadlineDate = new Date(goal.deadline);
+      const monthsLeft = Math.max(0.5,
+        (deadlineDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24 * 30),
+      );
+      const monthlyRequired = this.round2(remaining / monthsLeft);
+
+      // Available savings after other goal commitments
+      const availableForThisGoal = avgMonthlySavings - (goalCommitments - monthlyRequired);
+      const shortfall = this.round2(Math.max(0, monthlyRequired - availableForThisGoal));
+      const ratio = availableForThisGoal > 0 ? monthlyRequired / availableForThisGoal : Infinity;
+
+      let feasibility: 'realistic' | 'tight' | 'unreachable';
+      let message: string;
+
+      if (ratio <= 0.8) {
+        feasibility = 'realistic';
+        message = `On track — save ${this.round2(monthlyRequired).toFixed(0)}/mo to hit your ${deadlineDate.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })} deadline`;
+      } else if (ratio <= 1.2) {
+        feasibility = 'tight';
+        message = `Tight — requires ${this.round2(monthlyRequired).toFixed(0)}/mo which is close to your available savings`;
+      } else {
+        feasibility = 'unreachable';
+        message = `Unreachable at current pace — need ${this.round2(monthlyRequired).toFixed(0)}/mo but only ~${this.round2(availableForThisGoal).toFixed(0)} available. Save ${shortfall.toFixed(0)} more/mo or extend the deadline`;
+      }
+
+      return {
+        goalId: goal.id,
+        name: goal.name,
+        icon: goal.icon,
+        color: goal.color,
+        target: goal.target_amount,
+        current: goal.current_amount,
+        remaining: this.round2(remaining),
+        progressPct,
+        deadline: goal.deadline,
+        feasibility,
+        monthsNeeded: Math.ceil(monthsLeft),
+        monthlySavingsRequired: monthlyRequired,
+        shortfallPerMonth: shortfall > 0 ? shortfall : null,
+        message,
+      };
+    });
+
+    return {
+      goals: results,
+      context: {
+        avgMonthlySavings: this.round2(avgMonthlySavings),
+        totalGoalCommitmentsPerMonth: this.round2(goalCommitments),
+        availableSavings: this.round2(avgMonthlySavings - goalCommitments),
+      },
+    };
+  }
+
+  // ─── 11. Financial Health Score ───────────────────────────────────────────
+  // 0–100 score from: savings rate, budget adherence, emergency fund, goal progress, debt.
+
+  async getHealthScore(userId: string) {
+    await this.categories.ensureDefaults(userId);
+    const today = new Date();
+
+    const [cardsRes, budgetsRes, goalsRes, liabRes, txsRes] = await Promise.all([
+      this.supabase.db.from('Cards').select('balance').eq('user_id', userId),
+      this.supabase.db.from('Budgets').select('*')
+        .eq('user_id', userId).eq('month', today.getMonth() + 1).eq('year', today.getFullYear()),
+      this.supabase.db.from('Savings').select('target_amount, current_amount, status').eq('user_id', userId),
+      this.supabase.db.from('liabilities').select('balance').eq('user_id', userId),
+      this.supabase.db.from('Transactions').select('amount, type').eq('user_id', userId).gte('date', this.daysAgo(90)),
+    ]);
+
+    const totalBalance = (cardsRes.data ?? []).reduce((s: number, c: { balance: number }) => s + (c.balance ?? 0), 0);
+    const budgets = budgetsRes.data ?? [];
+    const goals = goalsRes.data ?? [];
+    const totalDebt = (liabRes.data ?? []).reduce((s: number, l: { balance: number }) => s + l.balance, 0);
+    const txs = txsRes.data ?? [];
+
+    const income3mo = txs.filter((t: { type: string }) => t.type === 'income').reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const expenses3mo = txs.filter((t: { type: string }) => t.type === 'expense').reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const avgMonthlyIncome = income3mo / 3;
+    const avgMonthlyExpenses = expenses3mo / 3;
+    const savingsRate = avgMonthlyIncome > 0 ? (avgMonthlyIncome - avgMonthlyExpenses) / avgMonthlyIncome : 0;
+
+    const components: { name: string; score: number; maxScore: number; insight: string }[] = [];
+
+    // 1. Savings rate (25 pts): 20%+ = full, linear below
+    const savingsScore = Math.min(25, Math.round(Math.max(0, savingsRate) * 125));
+    components.push({
+      name: 'Savings Rate',
+      score: savingsScore,
+      maxScore: 25,
+      insight: savingsRate >= 0.2
+        ? `Great — you're saving ${Math.round(savingsRate * 100)}% of income`
+        : savingsRate >= 0.1
+        ? `Saving ${Math.round(savingsRate * 100)}% — aim for 20%`
+        : savingsRate > 0
+        ? `Only saving ${Math.round(savingsRate * 100)}% — increase income or cut expenses`
+        : 'Spending more than you earn',
+    });
+
+    // 2. Budget adherence (20 pts): pct of budgets not exceeded
+    const activeBudgets = budgets.filter((b: { limit_amount: number }) => b.limit_amount > 0);
+    const adherenceScore = activeBudgets.length > 0
+      ? Math.round((activeBudgets.filter((b: { spent_amount: number; limit_amount: number }) =>
+          b.spent_amount <= b.limit_amount).length / activeBudgets.length) * 20)
+      : 10; // neutral if no budgets set
+    const exceededCount = activeBudgets.filter((b: { spent_amount: number; limit_amount: number }) => b.spent_amount > b.limit_amount).length;
+    components.push({
+      name: 'Budget Adherence',
+      score: adherenceScore,
+      maxScore: 20,
+      insight: activeBudgets.length === 0
+        ? 'Set budgets to track adherence'
+        : exceededCount === 0
+        ? 'All budgets on track this month'
+        : `${exceededCount} budget${exceededCount > 1 ? 's' : ''} exceeded this month`,
+    });
+
+    // 3. Emergency fund (20 pts): 3mo expenses = full score
+    const emergencyMonths = avgMonthlyExpenses > 0 ? totalBalance / avgMonthlyExpenses : 0;
+    const emergencyScore = Math.min(20, Math.round((emergencyMonths / 3) * 20));
+    components.push({
+      name: 'Emergency Fund',
+      score: emergencyScore,
+      maxScore: 20,
+      insight: emergencyMonths >= 3
+        ? `${emergencyMonths.toFixed(1)} months of expenses covered`
+        : emergencyMonths >= 1
+        ? `${emergencyMonths.toFixed(1)} months covered — build to 3`
+        : 'Less than 1 month of expenses in reserve',
+    });
+
+    // 4. Goal progress (20 pts): average progress across active goals
+    const activeGoals = goals.filter((g: { status: string }) => g.status === 'active');
+    const avgGoalProgress = activeGoals.length > 0
+      ? activeGoals.reduce((s: number, g: { target_amount: number; current_amount: number }) =>
+          s + (g.target_amount > 0 ? g.current_amount / g.target_amount : 0), 0) / activeGoals.length
+      : 0.5; // neutral if no goals
+    const goalScore = Math.round(avgGoalProgress * 20);
+    components.push({
+      name: 'Goal Progress',
+      score: goalScore,
+      maxScore: 20,
+      insight: activeGoals.length === 0
+        ? 'Set savings goals to track progress'
+        : `${Math.round(avgGoalProgress * 100)}% average progress across ${activeGoals.length} goal${activeGoals.length > 1 ? 's' : ''}`,
+    });
+
+    // 5. Debt load (15 pts): 0 debt = full, scales down with debt-to-income
+    const debtToIncome = avgMonthlyIncome > 0 ? totalDebt / (avgMonthlyIncome * 12) : 0;
+    const debtScore = Math.round(Math.max(0, Math.min(15, (1 - Math.min(1, debtToIncome)) * 15)));
+    components.push({
+      name: 'Debt Load',
+      score: debtScore,
+      maxScore: 15,
+      insight: totalDebt === 0
+        ? 'No liabilities recorded'
+        : debtToIncome < 0.3
+        ? `Debt-to-income ratio is healthy (${Math.round(debtToIncome * 100)}%)`
+        : `Debt-to-income ratio is ${Math.round(debtToIncome * 100)}% — work on reducing balances`,
+    });
+
+    const totalScore = components.reduce((s, c) => s + c.score, 0);
+    const grade =
+      totalScore >= 85 ? 'A' :
+      totalScore >= 70 ? 'B' :
+      totalScore >= 55 ? 'C' :
+      totalScore >= 40 ? 'D' : 'F';
+
+    const trend =
+      totalScore >= 75 ? 'Excellent shape' :
+      totalScore >= 60 ? 'Good — a few areas to improve' :
+      totalScore >= 45 ? 'Fair — meaningful improvements available' :
+      'Needs attention';
+
+    return {
+      score: totalScore,
+      maxScore: 100,
+      grade,
+      trend,
+      components,
+      lastUpdated: today.toISOString(),
+    };
+  }
+
+  // ─── 12. Seasonality Modeler ──────────────────────────────────────────────
+  // Detects which months historically spike or dip per category (needs 12+ months).
+  // Returns monthly multipliers to improve budget suggestions.
+
+  async getSeasonality(userId: string) {
+    await this.categories.ensureDefaults(userId);
+
+    const { data: txs } = await this.supabase.db
+      .from('Transactions')
+      .select('amount, date, category_id')
+      .eq('user_id', userId)
+      .eq('type', 'expense')
+      .gte('date', this.daysAgo(365));
+
+    // Group by category + month-of-year (1-12)
+    const byCategory = new Map<string, Map<number, number[]>>();
+    for (const tx of txs ?? []) {
+      const slug = await this.categories.resolveSlug(userId, tx.category_id);
+      const month = new Date(tx.date).getMonth() + 1;
+      if (!byCategory.has(slug)) byCategory.set(slug, new Map());
+      if (!byCategory.get(slug)!.has(month)) byCategory.get(slug)!.set(month, []);
+      byCategory.get(slug)!.get(month)!.push(tx.amount);
+    }
+
+    const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const results: {
+      category: string;
+      hasSeasonality: boolean;
+      peakMonth: string | null;
+      troughMonth: string | null;
+      peakMultiplier: number;
+      troughMultiplier: number;
+      monthlyMultipliers: { month: string; multiplier: number }[];
+    }[] = [];
+
+    for (const [category, monthMap] of byCategory) {
+      const monthTotals: number[] = Array(12).fill(0);
+      const monthCounts: number[] = Array(12).fill(0);
+
+      for (const [month, amounts] of monthMap) {
+        monthTotals[month - 1] = amounts.reduce((s, a) => s + a, 0);
+        monthCounts[month - 1] = amounts.length;
+      }
+
+      const activeTotals = monthTotals.filter((t) => t > 0);
+      if (activeTotals.length < 3) continue; // not enough data
+
+      const avg = activeTotals.reduce((s, v) => s + v, 0) / activeTotals.length;
+
+      const multipliers = monthTotals.map((total) =>
+        total > 0 ? this.round2(total / avg) : null,
+      );
+
+      const peakIdx = multipliers.reduce((best, m, i) =>
+        m !== null && (multipliers[best] === null || m > (multipliers[best] ?? 0)) ? i : best, 0);
+      const troughIdx = multipliers.reduce((best, m, i) =>
+        m !== null && (multipliers[best] === null || m < (multipliers[best] ?? Infinity)) ? i : best, 0);
+
+      const peakMult = multipliers[peakIdx] ?? 1;
+      const troughMult = multipliers[troughIdx] ?? 1;
+
+      // Only flag if variance is meaningful (>20% swing)
+      const hasSeasonality = peakMult - troughMult > 0.4;
+
+      results.push({
+        category,
+        hasSeasonality,
+        peakMonth: hasSeasonality ? MONTH_LABELS[peakIdx] : null,
+        troughMonth: hasSeasonality ? MONTH_LABELS[troughIdx] : null,
+        peakMultiplier: peakMult,
+        troughMultiplier: troughMult,
+        monthlyMultipliers: MONTH_LABELS.map((month, i) => ({
+          month,
+          multiplier: multipliers[i] ?? 0,
+        })),
+      });
+    }
+
+    const currentMonth = new Date().getMonth();
+    const upcomingSpikes = results
+      .filter((r) => r.hasSeasonality)
+      .map((r) => {
+        const nextHighMonth = r.monthlyMultipliers
+          .map((m, i) => ({ ...m, idx: i }))
+          .filter((m) => m.multiplier > 1.2 && m.idx > currentMonth)
+          .sort((a, b) => a.idx - b.idx)[0];
+        return nextHighMonth ? { category: r.category, month: nextHighMonth.month, multiplier: nextHighMonth.multiplier } : null;
+      })
+      .filter(Boolean)
+      .slice(0, 5);
+
+    return {
+      categories: results,
+      upcomingSpikes,
+      hasEnoughData: results.length > 0,
+    };
+  }
+
+  // ─── 13. Auto-Categorization ───────────────────────────────────────────────
   // Pattern-match merchant names; learn from user corrections via Merchant_Rules table
 
   suggestCategory(merchant: string): string | null {

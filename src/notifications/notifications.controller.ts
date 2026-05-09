@@ -46,4 +46,16 @@ export class NotificationsController {
   getDeviceTokens(@CurrentUser() user: User) {
     return this.service.getUserTokens(user.id);
   }
+
+  @Post('digest')
+  async sendDigest(@CurrentUser() user: User) {
+    const today = new Date();
+    const weekStart = new Date(today);
+    weekStart.setDate(today.getDate() - 7);
+    return this.service.generateDigestForUser(
+      user.id,
+      weekStart.toISOString().split('T')[0],
+      today.toISOString().split('T')[0],
+    );
+  }
 }

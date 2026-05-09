@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../common/supabase.service';
 import webpush from 'web-push';
 
@@ -110,6 +111,62 @@ export class NotificationsService {
           .eq('user_id', userId);
       }
     }
+  }
+
+  // ── Weekly Digest ─────────────────────────────────────────────────────────
+  // Sends every Monday at 8am. Creates a notification + push for each opted-in user.
+
+  @Cron('0 8 * * 1')
+  async sendWeeklyDigests() {
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const weekStart = oneWeekAgo.toISOString().split('T')[0];
+    const today = new Date().toISOString().split('T')[0];
+
+    // Get users who have weekly_summary enabled
+    const { data: settings } = await this.supabase.db
+      .from('User_settings')
+      .select('user_id')
+      .eq('weekly_summary', true);
+
+    for (const setting of settings ?? []) {
+      await this.generateDigestForUser(setting.user_id, weekStart, today);
+    }
+  }
+
+  async generateDigestForUser(userId: string, weekStart: string, weekEnd: string) {
+    const { data: txs } = await this.supabase.db
+      .from('Transactions')
+      .select('amount, type')
+      .eq('user_id', userId)
+      .gte('date', weekStart)
+      .lte('date', weekEnd);
+
+    const expenses = (txs ?? []).filter((t: { type: string }) => t.type === 'expense');
+    const totalSpend = expenses.reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const transactionCount = expenses.length;
+
+    // Previous week for comparison
+    const prevStart = new Date(weekStart);
+    prevStart.setDate(prevStart.getDate() - 7);
+    const { data: prevTxs } = await this.supabase.db
+      .from('Transactions').select('amount, type').eq('user_id', userId).eq('type', 'expense')
+      .gte('date', prevStart.toISOString().split('T')[0]).lte('date', weekStart);
+
+    const prevSpend = (prevTxs ?? []).reduce((s: number, t: { amount: number }) => s + t.amount, 0);
+    const diff = prevSpend > 0 ? ((totalSpend - prevSpend) / prevSpend) * 100 : 0;
+    const trend = diff > 10 ? `↑ ${diff.toFixed(0)}% more` : diff < -10 ? `↓ ${Math.abs(diff).toFixed(0)}% less` : 'about the same';
+
+    const title = 'Your Weekly Digest';
+    const body = `You spent $${totalSpend.toFixed(2)} across ${transactionCount} transaction${transactionCount !== 1 ? 's' : ''} — ${trend} than last week.`;
+
+    // In-app notification
+    await this.supabase.db.from('Notifications').insert({
+      user_id: userId, type: 'system', title, body, is_read: false,
+    });
+
+    // Push notification
+    await this.sendPush(userId, title, body);
   }
 
   async registerDevice(userId: string, token: string, deviceType: string) {
