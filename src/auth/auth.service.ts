@@ -154,7 +154,7 @@ export class AuthService {
       <table width="520" cellpadding="0" cellspacing="0" style="background:#1a1612;border-radius:16px;border:1px solid #2a2420;overflow:hidden;">
         <tr>
           <td style="padding:32px 40px 24px;border-bottom:1px solid #2a2420;">
-            <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly</p>
+            <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly&#8482;</p>
             <p style="margin:6px 0 0;font-size:13px;color:#8a7f76;">Verification code</p>
           </td>
         </tr>
@@ -186,7 +186,7 @@ export class AuthService {
     await this.transporter.sendMail({
       from: `"${fromName}" <${fromEmail}>`,
       to,
-      subject: `${code} — Your Vaultly verification code`,
+      subject: `${code} — Your Vaultly™ verification code`,
       html,
       text: `Your Vaultly verification code: ${code}\n\nThis code expires in 5 minutes. If you didn't request this, ignore this email.`,
     });

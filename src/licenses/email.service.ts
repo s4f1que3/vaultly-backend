@@ -40,7 +40,7 @@ export class EmailService {
           <!-- Header -->
           <tr>
             <td style="padding:32px 40px 24px;border-bottom:1px solid #2a2420;">
-              <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly</p>
+              <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly&#8482;</p>
               <p style="margin:6px 0 0;font-size:13px;color:#8a7f76;">Your lifetime license</p>
             </td>
           </tr>
@@ -95,7 +95,7 @@ export class EmailService {
       await this.transporter.sendMail({
         from: `"${fromName}" <${fromEmail}>`,
         to,
-        subject: 'Your Vaultly Lifetime License Key',
+        subject: 'Your Vaultly™ Lifetime License Key',
         html,
         text: `Your Vaultly Lifetime License Key\n\n${licenseKey}\n\nUse this key to sign up at: ${signupUrl}\n\nThis is a single-use key — keep it safe.`,
       });
@@ -121,7 +121,7 @@ export class EmailService {
       <table width="520" cellpadding="0" cellspacing="0" style="background:#1a1612;border-radius:16px;border:1px solid #2a2420;overflow:hidden;">
         <tr>
           <td style="padding:32px 40px 24px;border-bottom:1px solid #2a2420;">
-            <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly</p>
+            <p style="margin:0;font-size:22px;font-weight:700;color:#f5f0eb;letter-spacing:-0.5px;">Vaultly&#8482;</p>
             <p style="margin:6px 0 0;font-size:13px;color:#8a7f76;">Household invitation</p>
           </td>
         </tr>
@@ -158,7 +158,7 @@ export class EmailService {
       await this.transporter.sendMail({
         from: `"${fromName}" <${fromEmail}>`,
         to,
-        subject: `${inviterName} invited you to join ${householdName} on Vaultly`,
+        subject: `${inviterName} invited you to join ${householdName} on Vaultly™`,
         html,
         text: `${inviterName} has invited you to join the "${householdName}" household on Vaultly.\n\nLog in to accept or decline: ${acceptUrl}`,
       });
