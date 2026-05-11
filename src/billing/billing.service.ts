@@ -57,6 +57,13 @@ export class BillingService {
 
   // ─── Subscription creation ─────────────────────────────────────────────────
 
+  // Guest (pre-auth) initiation — no DB record, no auth required.
+  // The JS SDK returns subscriptionId; user creates account after payment, then calls activate.
+  async guestInitiateSubscription(plan: BillingPlan): Promise<{ subscriptionId: string }> {
+    const { subscriptionId } = await this.paypal.createSubscription(plan);
+    return { subscriptionId };
+  }
+
   async initiateSubscription(
     userId: string,
     plan: BillingPlan,
@@ -68,16 +75,11 @@ export class BillingService {
     }
 
     const now = new Date();
-    // PayPal requires start_time to be in the future
-    const startTime = new Date(now.getTime() + 5 * 60 * 1000);
     const billingDay = now.getDate();
     const periodEnd = this.calcPeriodEnd(now, plan);
 
-    const { subscriptionId } = await this.paypal.createSubscription(
-      plan,
-      userEmail,
-      startTime,
-    );
+    // No start_time — PayPal charges immediately on approval
+    const { subscriptionId } = await this.paypal.createSubscription(plan, userEmail);
 
     await this.supabase.db.from('app_subscriptions').upsert(
       {
@@ -116,22 +118,41 @@ export class BillingService {
     }
 
     const { last4, brand } = this.extractPaymentMethod(paypalSub);
+    const plan = this.resolvePlan(paypalSub.plan_id);
+    const now = new Date();
+    const periodEnd = this.calcPeriodEnd(now, plan);
 
-    const { error } = await this.supabase.db
-      .from('app_subscriptions')
-      .update({
+    // Upsert: works whether or not a prior initiate() record exists (guest checkout flow)
+    const { error } = await this.supabase.db.from('app_subscriptions').upsert(
+      {
+        user_id: userId,
+        plan,
         status: 'active',
+        billing_day: now.getDate(),
+        current_period_start: now.toISOString(),
+        current_period_end: periodEnd.toISOString(),
+        next_billing_date: periodEnd.toISOString(),
+        paypal_subscription_id: paypalSubscriptionId,
+        pending_paypal_subscription_id: null,
+        pending_plan: null,
         payment_method_last4: last4,
         payment_method_brand: brand,
         cancelled_at: null,
-        updated_at: new Date().toISOString(),
-      })
-      .eq('user_id', userId)
-      .eq('paypal_subscription_id', paypalSubscriptionId);
+        grace_period_end: null,
+        updated_at: now.toISOString(),
+      },
+      { onConflict: 'user_id' },
+    );
 
     if (error) throw new BadRequestException('Failed to activate subscription');
 
     return this.getSubscriptionOrThrow(userId);
+  }
+
+  private resolvePlan(planId: string | undefined): BillingPlan {
+    if (planId === this.paypal.getMonthlyPlanId()) return 'monthly';
+    if (planId === this.paypal.getYearlyPlanId()) return 'yearly';
+    return 'monthly';
   }
 
   // ─── Subscription query ────────────────────────────────────────────────────
@@ -246,8 +267,8 @@ export class BillingService {
     let immediate: boolean;
 
     if (newPlan === 'yearly') {
-      // Monthly → Yearly: charge immediately — 5 min buffer for PayPal
-      startTime = new Date(Date.now() + 5 * 60 * 1000);
+      // Monthly → Yearly: charge immediately — no start_time needed
+      startTime = new Date(); // unused; createSubscription omits it for immediate charge
       immediate = true;
     } else {
       // Yearly → Monthly: no charge until current year ends
@@ -255,10 +276,11 @@ export class BillingService {
       immediate = false;
     }
 
+    // Monthly→Yearly: no start_time (charge immediately). Yearly→Monthly: defer to period end.
     const { subscriptionId, approveUrl } = await this.paypal.createSubscription(
       newPlan,
       userEmail,
-      startTime,
+      immediate ? undefined : startTime,
     );
 
     await this.supabase.db

@@ -15,6 +15,7 @@ interface PayPalLink {
 interface PayPalSubscriptionResponse {
   id: string;
   status: string;
+  plan_id?: string;
   links: PayPalLink[];
   subscriber?: {
     email_address?: string;
@@ -192,30 +193,35 @@ export class PaypalService implements OnModuleInit {
 
   async createSubscription(
     plan: 'monthly' | 'yearly',
-    userEmail: string,
-    startTime: Date,
+    userEmail?: string,
+    startTime?: Date,
   ): Promise<{ subscriptionId: string; approveUrl: string }> {
     const planId = plan === 'monthly' ? this.monthlyPlanId : this.yearlyPlanId;
     if (!planId) throw new Error(`PayPal ${plan} plan ID not configured`);
 
     const frontendUrl = this.config.get<string>('FRONTEND_URL');
 
+    const body: Record<string, unknown> = {
+      plan_id: planId,
+      application_context: {
+        brand_name: 'Vaultly',
+        locale: 'en-US',
+        return_url: `${frontendUrl}/billing/success`,
+        cancel_url: `${frontendUrl}/billing/cancel`,
+        shipping_preference: 'NO_SHIPPING',
+        user_action: 'SUBSCRIBE_NOW',
+      },
+    };
+
+    // Only include start_time when deferring (e.g. downgrade to monthly, reactivation mid-period)
+    // Omitting it causes PayPal to charge immediately on approval — which is what we want for new subs
+    if (startTime) body.start_time = startTime.toISOString();
+    if (userEmail) body.subscriber = { email_address: userEmail };
+
     const result = await this.request<PayPalSubscriptionResponse>(
       'POST',
       '/v1/billing/subscriptions',
-      {
-        plan_id: planId,
-        start_time: startTime.toISOString(),
-        subscriber: { email_address: userEmail },
-        application_context: {
-          brand_name: 'Vaultly',
-          locale: 'en-US',
-          return_url: `${frontendUrl}/billing/success`,
-          cancel_url: `${frontendUrl}/billing/cancel`,
-          shipping_preference: 'NO_SHIPPING',
-          user_action: 'SUBSCRIBE_NOW',
-        },
-      },
+      body,
     );
 
     const approveLink = result.links.find((l) => l.rel === 'approve');

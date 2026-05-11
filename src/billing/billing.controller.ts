@@ -35,6 +35,20 @@ export class BillingController {
 
   constructor(private readonly billing: BillingService) {}
 
+  // ─── Guest checkout (no auth) ──────────────────────────────────────────────
+  // Creates the PayPal subscription before the user has an account.
+  // After payment approval, the user creates their account and calls /activate.
+
+  @Post('guest-initiate')
+  @HttpCode(200)
+  @Public()
+  async guestInitiate(@Body() dto: { plan: 'monthly' | 'yearly' }) {
+    if (dto.plan !== 'monthly' && dto.plan !== 'yearly') {
+      throw new Error('Invalid plan');
+    }
+    return this.billing.guestInitiateSubscription(dto.plan);
+  }
+
   // ─── Subscription creation ─────────────────────────────────────────────────
 
   @Post('subscribe')
